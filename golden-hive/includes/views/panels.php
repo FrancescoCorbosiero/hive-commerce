@@ -395,6 +395,11 @@
 <!-- ═══ BULK IMPORT ═══ -->
 <div class="panel" id="panel-bulkimport" style="position:relative">
     <div class="section-title">Importa prodotti da JSON</div>
+    <div style="font-size:11px;color:var(--dim);margin:0 0 10px;line-height:1.5">
+        Immagini: <code>"images": [{"src": "https://…", "alt": "…", "name": "…"}]</code> (oppure <code>{"id": 123}</code>, o URL semplici). La prima diventa l'immagine in evidenza, le altre la galleria; sulle varianti usa <code>"image"</code>.
+        Se l'immagine &egrave; gi&agrave; nella media library (URL di questo sito, ID, o importata in passato) viene collegata, altrimenti viene scaricata.
+        Senza chiave immagini il prodotto resta com'&egrave;; <code>"images": []</code> rimuove in evidenza e galleria.
+    </div>
     <div class="drop-area" id="imp-drop" onclick="document.getElementById('imp-file-input').click()">
         <input type="file" id="imp-file-input" accept=".json" style="display:none" />
         <div class="drop-area-text">Clicca o trascina un file .json</div>

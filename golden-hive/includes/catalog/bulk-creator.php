@@ -83,15 +83,23 @@ function rp_cm_bulk_preview( array $data, string $mode = 'create' ): array {
             'existing_id'     => $existing,
             'variation_count' => count( $entry['variations'] ?? [] ),
             'hide_count'      => $hide_count,
+            // Piano immagini senza effetti: quante si riusano dalla media
+            // library, quante si scaricano, quante sono invalide.
+            'images'          => function_exists( 'gh_img_plan_summary' ) ? gh_img_plan_summary( $entry ) : null,
         ];
     }
 
+    $img = static fn( string $k ) => array_sum( array_map( fn( $d ) => (int) ( $d['images'][ $k ] ?? 0 ), $details ) );
+
     return [
         'summary' => [
-            'total'     => count( $details ),
-            'to_create' => count( array_filter( $details, fn( $d ) => $d['action'] === 'create' ) ),
-            'to_update' => count( array_filter( $details, fn( $d ) => $d['action'] === 'update' ) ),
-            'to_hide'   => array_sum( array_map( fn( $d ) => (int) $d['hide_count'], $details ) ),
+            'total'          => count( $details ),
+            'to_create'      => count( array_filter( $details, fn( $d ) => $d['action'] === 'create' ) ),
+            'to_update'      => count( array_filter( $details, fn( $d ) => $d['action'] === 'update' ) ),
+            'to_hide'        => array_sum( array_map( fn( $d ) => (int) $d['hide_count'], $details ) ),
+            'img_existing'   => $img( 'existing' ) + $img( 'local_file' ),
+            'img_download'   => $img( 'download' ),
+            'img_invalid'    => $img( 'invalid' ),
         ],
         'details' => $details,
     ];
@@ -138,6 +146,11 @@ function rp_cm_bulk_apply( array $data, string $mode = 'create' ): array {
                     'status'          => 'created',
                     'id'              => $product_id,
                     'variation_count' => count( $entry['variations'] ?? [] ),
+                    'images'          => gh_cm_bulk_apply_images(
+                        $product_id,
+                        $entry,
+                        $type === 'variable' ? gh_cm_fresh_variation_ids( $product_id ) : []
+                    ),
                 ];
             }
             $details[] = $result;
@@ -153,13 +166,21 @@ function rp_cm_bulk_apply( array $data, string $mode = 'create' ): array {
         }
     }
 
+    $img = static fn( string $k ) => array_sum( array_map(
+        fn( $d ) => $k === 'failed' ? count( $d['images']['failed'] ?? [] ) : (int) ( $d['images'][ $k ] ?? 0 ),
+        $details
+    ) );
+
     return [
         'summary' => [
-            'total'   => count( $details ),
-            'created' => count( array_filter( $details, fn( $d ) => $d['status'] === 'created' ) ),
-            'updated' => count( array_filter( $details, fn( $d ) => $d['status'] === 'updated' ) ),
-            'errors'  => count( array_filter( $details, fn( $d ) => $d['status'] === 'error' ) ),
-            'hidden'  => array_sum( array_map( fn( $d ) => (int) ( $d['hidden'] ?? 0 ), $details ) ),
+            'total'          => count( $details ),
+            'created'        => count( array_filter( $details, fn( $d ) => $d['status'] === 'created' ) ),
+            'updated'        => count( array_filter( $details, fn( $d ) => $d['status'] === 'updated' ) ),
+            'errors'         => count( array_filter( $details, fn( $d ) => $d['status'] === 'error' ) ),
+            'hidden'         => array_sum( array_map( fn( $d ) => (int) ( $d['hidden'] ?? 0 ), $details ) ),
+            'img_reused'     => $img( 'reused' ) + $img( 'registered' ),
+            'img_downloaded' => $img( 'downloaded' ),
+            'img_failed'     => $img( 'failed' ),
         ],
         'details' => $details,
     ];
@@ -194,8 +215,9 @@ function rp_cm_bulk_update_existing( int $product_id, array $entry, bool $hide_m
     // Varianti
     $var_count = 0;
     $hidden    = 0;
+    $var_ids   = []; // indice nel JSON → variation ID (per le immagini variante)
     if ( $product->is_type( 'variable' ) && ! empty( $entry['variations'] ) ) {
-        foreach ( $entry['variations'] as $var_data ) {
+        foreach ( array_values( $entry['variations'] ) as $i => $var_data ) {
             $var_id = null;
             if ( ! empty( $var_data['sku'] ) ) {
                 $var_id = wc_get_product_id_by_sku( $var_data['sku'] );
@@ -205,9 +227,10 @@ function rp_cm_bulk_update_existing( int $product_id, array $entry, bool $hide_m
                 if ( $v && $v->is_type( 'variation' ) ) {
                     gh_apply_product_fields( $v, $var_data );
                     $v->save();
+                    $var_ids[ $i ] = (int) $var_id;
                 }
             } else {
-                gh_create_variation( $product_id, $var_data );
+                $var_ids[ $i ] = (int) gh_create_variation( $product_id, $var_data );
             }
             $var_count++;
         }
@@ -228,6 +251,10 @@ function rp_cm_bulk_update_existing( int $product_id, array $entry, bool $hide_m
         }
     }
 
+    // Dopo varianti e sync: gh_img_apply_to_product ricarica il prodotto,
+    // quindi non sovrascrive con un oggetto stantio quanto salvato sopra.
+    $images = gh_cm_bulk_apply_images( $product_id, $entry, $var_ids );
+
     return [
         'name'            => $product->get_name(),
         'sku'             => $product->get_sku(),
@@ -236,7 +263,68 @@ function rp_cm_bulk_update_existing( int $product_id, array $entry, bool $hide_m
         'id'              => $product_id,
         'variation_count' => $var_count,
         'hidden'          => $hidden,
+        'images'          => $images,
     ];
+}
+
+/**
+ * Collega le immagini dell'entry al prodotto. Non lancia mai: un problema
+ * con le immagini non deve far risultare in errore un prodotto già salvato,
+ * finisce nel report (`failed`).
+ *
+ * @param int   $product_id
+ * @param array $entry
+ * @param array $variation_ids Indice variante nel JSON → variation ID.
+ * @return array|null Report di gh_img_apply_to_product, null se il modulo manca.
+ */
+function gh_cm_bulk_apply_images( int $product_id, array $entry, array $variation_ids = [] ): ?array {
+    if ( ! function_exists( 'gh_img_apply_to_product' ) ) {
+        return null;
+    }
+    try {
+        return gh_img_apply_to_product( $product_id, $entry, $variation_ids );
+    } catch ( \Throwable $e ) {
+        return [ 'touched' => true, 'failed' => [ [ 'src' => '', 'reason' => 'Errore immagini: ' . $e->getMessage() ] ] ];
+    }
+}
+
+/**
+ * ID delle varianti di un prodotto appena creato, in ordine di creazione.
+ * gh_create_variable_product le crea nell'ordine del JSON, quindi l'indice
+ * i-esimo corrisponde alla variante i-esima dell'entry. Query diretta (non
+ * get_children) per includere anche varianti draft/private.
+ *
+ * @param int $product_id
+ * @return int[]
+ */
+function gh_cm_fresh_variation_ids( int $product_id ): array {
+    return array_map( 'intval', get_posts( [
+        'post_type'      => 'product_variation',
+        'post_parent'    => $product_id,
+        'post_status'    => 'any',
+        'posts_per_page' => -1,
+        'orderby'        => 'ID',
+        'order'          => 'ASC',
+        'fields'         => 'ids',
+        'no_found_rows'  => true,
+    ] ) );
+}
+
+/**
+ * Peso di un'entry per il batching dell'import (AJAX chunked e job in
+ * background): 1 per il prodotto + 1 per variante + GH_IMG_IMPORT_WEIGHT per
+ * immagine dichiarata (un download con miniature costa ~1-3s). Il JS
+ * (bulkWeight in gh-core.js) usa la stessa formula.
+ *
+ * @param array $entry
+ * @return int
+ */
+function gh_cm_bulk_entry_weight( array $entry ): int {
+    $w = 1 + ( is_array( $entry['variations'] ?? null ) ? count( $entry['variations'] ) : 0 );
+    if ( function_exists( 'gh_img_count_in_entry' ) ) {
+        $w += gh_img_count_in_entry( $entry ) * GH_IMG_IMPORT_WEIGHT;
+    }
+    return $w;
 }
 
 /**

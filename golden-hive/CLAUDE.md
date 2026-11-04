@@ -46,7 +46,8 @@ golden-hive/
 │   └── js/gh-*.js               ← moduli che estendono GH: operations, inline, smart, navigation, media, mapper, jobs, email, email-campaigns, email-transactional, kicksdb, history, workflow, termpicker, settings
 └── includes/
     ├── core/                    ← Foundation helpers riutilizzabili (prefix: gh_)
-    │   ├── product-factory.php  ← gh_create_simple_product, gh_create_variable_product
+    │   ├── product-factory.php  ← gh_create_simple_product, gh_create_variable_product (NON gestisce immagini: i feed hanno la loro pipeline media)
+    │   ├── product-images.php   ← gh_img_* — immagini dell'Import JSON: riusa media esistenti (ID / preimport map / URL della media library di questo sito, anche miniature e -scaled / file già negli uploads ma non registrato) altrimenti sideload. gh_img_plan (preview senza effetti) + gh_img_apply_to_product (featured + gallery + immagini variante)
     │   ├── option-store.php     ← gh_option_list_all/_find/_upsert/_remove (CRUD generico wp_options-as-list)
     │   ├── ajax-helpers.php     ← gh_ajax_guard + gh_ajax_{text,textarea,key,email,int,bool,json,int_array}
     │   └── ui-helpers.php       ← gh_empty_state, gh_status_chip (HTML snippet standardizzati)
@@ -63,7 +64,7 @@ golden-hive/
     │   ├── taxonomy-manager.php ← rp_cm_get_taxonomy_tree, rp_cm_create_category, rp_cm_assign_product_categories
     │   ├── taxonomy-query.php   ← rp_cm_query_taxonomies (filter/sort/top-N), rp_cm_get_products_for_terms
     │   ├── smart-taxonomy.php   ← gh_smart_* (regole condizionali, STESSO schema conditions di Filter)
-    │   ├── bulk-creator.php     ← rp_cm_bulk_preview, rp_cm_bulk_apply (mode create|create_or_update|sync), gh_cm_dispatch_bulk_import (background job CDN-proof). Mode 'sync' nasconde le varianti assenti dal JSON (0 stock + disabilitate via gh_cm_hide_missing_variations), non le elimina
+    │   ├── bulk-creator.php     ← rp_cm_bulk_preview, rp_cm_bulk_apply (mode create|create_or_update|sync), gh_cm_dispatch_bulk_import (background job CDN-proof). Mode 'sync' nasconde le varianti assenti dal JSON (0 stock + disabilitate via gh_cm_hide_missing_variations), non le elimina. Immagini via gh_cm_bulk_apply_images (vedi "Import JSON — Immagini"); gh_cm_bulk_entry_weight = peso batch (1 + varianti + 4 per immagine), speculare a bulkWeight in gh-core.js
     │   └── ajax.php             ← AJAX bridge (export_roundtrip supporta include_ids; export_roundtrip_ids = lista ID per chunking client-side)
     ├── navigation/              ← (prefix: gh_nav_)
     │   ├── manager.php          ← gh_nav_get_menus, _get_menu_items, _upsert_item, _populate_from_terms, _clear_managed_children
@@ -193,7 +194,7 @@ browser dalla cache, rivalidando per versione.
 | | SF Feed | StockFirmati CSV feed (URL salvabile) |
 | | CSV Feed | Generic CSV feed via config-engine |
 | | KicksDB | Lookup/enrichment service + Discover search browser. 6 sub-section: Discover, Lookup, Refresh Pricing, Field Mapping, Provenance, Conflict Rules, Settings |
-| CATALOGO | Import JSON | Import prodotti da file .json (ex "Bulk JSON"). Modi: crea / crea-o-aggiorna (SKU) / sincronizza. Preview + apply, o Background come job CDN-proof |
+| CATALOGO | Import JSON | Import prodotti da file .json (ex "Bulk JSON"). Modi: crea / crea-o-aggiorna (SKU) / sincronizza. Preview + apply, o Background come job CDN-proof. Immagini: riuso dalla media library o sideload, colonna "Immagini" in preview e risultato |
 | | Roundtrip | Export snapshot filtrato &rarr; edit &rarr; re-import dello stesso envelope JSON |
 | | Catalog History | Snapshot + diff del catalogo (monitoring) |
 | TOOLS | HTTP Client | Test API generiche |
@@ -224,6 +225,42 @@ browser dalla cache, rivalidando per versione.
 > di Hive Commerce, non pipeline di sync. Nota: `Bulk JSON` è stato
 > rietichettato `Import JSON` — il panel id (`panel-bulkimport`), il deep-link
 > `#/bulkimport` e gli action AJAX (`rp_cm_ajax_bulk_*`) sono invariati.
+
+---
+
+## Import JSON — Immagini
+
+`includes/core/product-images.php`, chiamato SOLO da `catalog/bulk-creator.php`
+(non dal product factory: GS/SF/CSV/KicksDB hanno già la loro pipeline media
+e un hook nel factory causerebbe doppi download).
+
+**Formati** (il primo presente vince): `images: [{id?, src?, name?, alt?, position?} | "url" | 123]`
+(shape WC REST) · `featured_image_url` + `gallery_image_urls` (shape catalog export) ·
+`image`. Varianti: `image` (oppure la prima di `images`).
+
+**Semantica** (array_key_exists): chiave assente → immagini invariate · `[]` →
+featured + gallery rimosse (attachment NON eliminati) · lista → prima = featured,
+resto = gallery, ordinate per `position`, deduplicate. Se nessuna immagine di
+una lista non vuota si risolve, le immagini attuali restano.
+
+**Risoluzione** per immagine: `id` attachment → preimport map (URL già scaricato)
+→ URL della media library di questo sito (host senza www/schema, filtro
+`gh_img_local_hosts` per un CDN; match su `_wp_attached_file` anche da miniatura
+`-WxH` o originale `-scaled`/`-rotated`) → file presente negli uploads ma non
+registrato (registrato in place, senza copia) → download. Il download passa per
+`wp_http_validate_url` (niente host privati, porte 80/443/8080) e per
+`gh_preimport_download_batch( $items, 6, [ 'thumbnails' => true ] )`: miniature
+generate, nome file dal `name`/`alt`, URL salvato nella preimport map → un
+re-import dello stesso JSON non duplica nulla.
+
+**Metadati**: attachment nuovi → titolo da `name` (o nome prodotto), alt da
+`alt`. Attachment già esistenti → alt scritto solo se vuoto, parent solo se non
+assegnato (possono essere usati da altri prodotti).
+
+**Report**: `details[].images = { touched, featured, gallery, variations, reused,
+downloaded, registered, cleared, failed[{src, reason}] }`; summary
+`img_reused/img_downloaded/img_failed`; il job background porta anche
+`img_failures` (cap 50). Un errore immagini non fa mai fallire il prodotto.
 
 ---
 

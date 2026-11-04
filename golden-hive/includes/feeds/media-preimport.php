@@ -55,11 +55,19 @@ function gh_preimport_purge_by_attachment_ids( array $ids ): int {
  * Downloads a batch of image URLs using a sliding-window curl_multi and
  * imports each into WP media library with thumbnail generation DISABLED.
  *
- * @param array $urls       Array of { url, sku }.
+ * @param array $urls        Array of { url, sku, filename? } (or bare URL strings).
+ *                           `filename` = base name for the stored file (no
+ *                           extension); defaults to the SKU, then an URL hash.
  * @param int   $concurrency Max simultaneous connections (default 10).
- * @return array { downloaded, skipped, errors, error_urls, map_size }
+ * @param array $opts        { thumbnails?: bool } — true keeps WordPress'
+ *                           normal sub-size generation (default false = fast
+ *                           feed mode, original file only).
+ * @return array { downloaded, skipped, errors, error_urls, error_reasons, map_size }
+ *               error_reasons = url => human-readable reason.
  */
-function gh_preimport_download_batch( array $urls, int $concurrency = 10 ): array {
+function gh_preimport_download_batch( array $urls, int $concurrency = 10, array $opts = [] ): array {
+
+    $thumbnails = ! empty( $opts['thumbnails'] );
 
     if ( ! function_exists( 'media_handle_sideload' ) ) {
         require_once ABSPATH . 'wp-admin/includes/media.php';
@@ -73,12 +81,14 @@ function gh_preimport_download_batch( array $urls, int $concurrency = 10 ): arra
     $skipped    = 0;
     $errors     = 0;
     $error_urls = [];
+    $reasons    = [];
 
     // 1. Build the download queue — skip already-mapped URLs
     $queue = []; // [ { url, sku, tmp } ]
     foreach ( $urls as $item ) {
         $url = is_array( $item ) ? ( $item['url'] ?? '' ) : (string) $item;
         $sku = is_array( $item ) ? ( $item['sku'] ?? '' ) : '';
+        $fn  = is_array( $item ) ? (string) ( $item['filename'] ?? '' ) : '';
         if ( ! $url ) continue;
 
         if ( isset( $map[ $url ] ) && wp_get_attachment_url( $map[ $url ] ) ) {
@@ -86,12 +96,12 @@ function gh_preimport_download_batch( array $urls, int $concurrency = 10 ): arra
             continue;
         }
         unset( $map[ $url ] );
-        $queue[] = [ 'url' => $url, 'sku' => $sku ];
+        $queue[] = [ 'url' => $url, 'sku' => $sku, 'filename' => $fn ];
     }
 
     if ( empty( $queue ) ) {
         update_option( GH_MEDIA_PREIMPORT_MAP_KEY, $map, false );
-        return compact( 'downloaded', 'skipped', 'errors', 'error_urls' ) + [ 'map_size' => count( $map ) ];
+        return compact( 'downloaded', 'skipped', 'errors', 'error_urls' ) + [ 'error_reasons' => [], 'map_size' => count( $map ) ];
     }
 
     // 2. DISABLE THUMBNAIL GENERATION for speed.
@@ -99,7 +109,11 @@ function gh_preimport_download_batch( array $urls, int $concurrency = 10 ): arra
     //    5+ sub-sizes per image. This is the #1 bottleneck. Disabling it
     //    means only the original file is stored. Thumbnails can be
     //    regenerated later via "Regenerate Thumbnails" or WP-CLI.
-    add_filter( 'intermediate_image_sizes_advanced', '__return_empty_array', 999 );
+    //    Callers that import images the shop displays right away (Import
+    //    JSON) pass thumbnails=true and keep the normal sub-sizes.
+    if ( ! $thumbnails ) {
+        add_filter( 'intermediate_image_sizes_advanced', '__return_empty_array', 999 );
+    }
 
     // 3. Sliding-window curl_multi: keep $concurrency connections active.
     //    As each handle completes → immediately sideload the file into WP
@@ -143,10 +157,13 @@ function gh_preimport_download_batch( array $urls, int $concurrency = 10 ): arra
                 @unlink( $h['tmp'] );
                 $errors++;
                 $error_urls[] = $h['url'];
+                $reasons[ $h['url'] ] = $cerr !== '' ? 'Download fallito: ' . $cerr
+                    : ( ( $http < 200 || $http >= 400 ) ? 'HTTP ' . $http : 'File vuoto o troppo piccolo' );
             } else {
-                // Import into WP (fast — no thumbnails)
-                $ext      = pathinfo( parse_url( $h['url'], PHP_URL_PATH ), PATHINFO_EXTENSION ) ?: 'jpg';
-                $basename = $h['sku'] ? sanitize_file_name( $h['sku'] ) : md5( $h['url'] );
+                // Import into WP (fast — no thumbnails unless opted in)
+                $ext      = pathinfo( (string) parse_url( $h['url'], PHP_URL_PATH ), PATHINFO_EXTENSION ) ?: 'jpg';
+                $basename = $h['filename'] !== '' ? sanitize_file_name( $h['filename'] )
+                    : ( $h['sku'] ? sanitize_file_name( $h['sku'] ) : md5( $h['url'] ) );
                 $filename = $basename . '-' . substr( md5( $h['url'] ), 0, 6 ) . '.' . $ext;
 
                 $att_id = media_handle_sideload( [
@@ -158,6 +175,9 @@ function gh_preimport_download_batch( array $urls, int $concurrency = 10 ): arra
                     @unlink( $h['tmp'] );
                     $errors++;
                     $error_urls[] = $h['url'];
+                    // Es. "Sorry, you are not allowed to upload this file type."
+                    // per un .avif su un WordPress/server senza supporto AVIF.
+                    $reasons[ $h['url'] ] = $att_id->get_error_message();
                 } else {
                     $map[ $h['url'] ] = (int) $att_id;
                     // Orphan attachment (no product_id): mark as
@@ -190,7 +210,9 @@ function gh_preimport_download_batch( array $urls, int $concurrency = 10 ): arra
     curl_multi_close( $mh );
 
     // 4. Re-enable thumbnail generation
-    remove_filter( 'intermediate_image_sizes_advanced', '__return_empty_array', 999 );
+    if ( ! $thumbnails ) {
+        remove_filter( 'intermediate_image_sizes_advanced', '__return_empty_array', 999 );
+    }
 
     // 5. Persist map
     update_option( GH_MEDIA_PREIMPORT_MAP_KEY, $map, false );
@@ -199,7 +221,8 @@ function gh_preimport_download_batch( array $urls, int $concurrency = 10 ): arra
         'downloaded' => $downloaded,
         'skipped'    => $skipped,
         'errors'     => $errors,
-        'error_urls' => $error_urls,
+        'error_urls'    => $error_urls,
+        'error_reasons' => $reasons,
         'map_size'   => count( $map ),
     ];
 }
@@ -228,8 +251,9 @@ function gh_preimport_add_handle( $mh, array $active, array $item ): array {
         'ch'  => $ch,
         'fp'  => $fp,
         'tmp' => $tmp,
-        'url' => $item['url'],
-        'sku' => $item['sku'],
+        'url'      => $item['url'],
+        'sku'      => $item['sku'],
+        'filename' => (string) ( $item['filename'] ?? '' ),
     ];
 
     return $active;
