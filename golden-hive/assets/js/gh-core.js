@@ -490,8 +490,55 @@ const GH = (function() {
     // centinaia di save e sforare 100s lo stesso. Accumuliamo prodotti finche il
     // peso (1 + n_varianti) resta sotto il budget, cosi ogni request ha un numero
     // di scritture WC limitato a prescindere dalla distribuzione delle varianti.
+    // Le immagini pesano GH_IMG_IMPORT_WEIGHT (4) ciascuna: un download con
+    // miniature costa 1-3s. Stessa formula di gh_cm_bulk_entry_weight (PHP).
     const BULK_WEIGHT_BUDGET = 80;
-    function bulkWeight(p){ return 1 + ((p && p.variations && p.variations.length) || 0); }
+    const BULK_IMG_WEIGHT = 4;
+    function bulkImgCount(e, variation){
+        if(!e||typeof e!=='object')return 0;
+        const one=v=>(v===null||v===''||(Array.isArray(v)&&!v.length))?0:1;
+        const many=v=>Array.isArray(v)?v.length:(v&&typeof v==='object'?1:0);
+        if(variation){ if('image' in e)return one(e.image); if('images' in e)return Math.min(1,many(e.images)); return 0; }
+        if('images' in e)return many(e.images);
+        if('featured_image_url' in e||'gallery_image_urls' in e)return (e.featured_image_url?1:0)+(Array.isArray(e.gallery_image_urls)?e.gallery_image_urls.length:0);
+        if('image' in e)return one(e.image);
+        return 0;
+    }
+    function bulkWeight(p){
+        const vars=(p&&Array.isArray(p.variations))?p.variations:[];
+        let imgs=bulkImgCount(p,false);
+        for(const v of vars)imgs+=bulkImgCount(v,true);
+        return 1 + vars.length + imgs*BULK_IMG_WEIGHT;
+    }
+    // Cella "Immagini" del preview: piano senza effetti (riuso / download / invalide).
+    function bulkImgPlanCell(im){
+        if(!im||im.untouched)return '<span style="color:var(--dim)" title="Nessuna chiave immagine nel JSON: immagini attuali invariate">\u2013</span>';
+        if(im.clear&&!im.declared)return '<span style="color:var(--amb)" title="images: [] \u2192 featured e gallery verranno rimosse">rimuovi</span>';
+        const parts=[];
+        if(im.existing||im.local_file)parts.push('<span style="color:var(--grn)" title="Gi\u00e0 nella media library: verranno collegate senza scaricarle">\u267b '+((im.existing||0)+(im.local_file||0))+'</span>');
+        if(im.download)parts.push('<span style="color:var(--acc)" title="Verranno scaricate (sideload)">\u2193 '+im.download+'</span>');
+        if(im.invalid){const t=(im.invalid_details||[]).map(x=>x.src+' \u2014 '+x.reason).join('\n');parts.push('<span style="color:var(--red)" title="'+esc(t)+'">\u2717 '+im.invalid+'</span>');}
+        return parts.join(' ')||'\u2013';
+    }
+    // Cella "Immagini" del risultato.
+    function bulkImgResultCell(im){
+        if(!im||!im.touched)return '<span style="color:var(--dim)">\u2013</span>';
+        if(im.cleared)return '<span style="color:var(--amb)">rimosse</span>';
+        const parts=[];
+        if(im.reused||im.registered)parts.push('<span style="color:var(--grn)" title="Collegate dalla media library">\u267b '+((im.reused||0)+(im.registered||0))+'</span>');
+        if(im.downloaded)parts.push('<span style="color:var(--acc)" title="Scaricate">\u2193 '+im.downloaded+'</span>');
+        const f=(im.failed||[]).length;
+        if(f){const t=im.failed.map(x=>x.src+' \u2014 '+x.reason).join('\n');parts.push('<span style="color:var(--red)" title="'+esc(t)+'">\u2717 '+f+'</span>');}
+        return parts.join(' ')||'\u2013';
+    }
+    // Elenco esplicito delle immagini non collegate (i tooltip da soli si perdono).
+    function bulkImgFailures(details, key){
+        const rows=[];
+        for(const d of details){const list=key==='plan'?((d.images&&d.images.invalid_details)||[]):((d.images&&d.images.failed)||[]);for(const x of list)rows.push('<li><b>'+esc(d.sku||d.name||'')+'</b> \u2014 <span style="font-family:var(--mono)">'+esc(x.src||'')+'</span>: '+esc(x.reason||'')+'</li>');}
+        if(!rows.length)return '';
+        const title=key==='plan'?'Immagini non valide (verranno saltate)':'Immagini non collegate';
+        return '<div style="margin-top:10px;padding:8px 12px;border:1px solid var(--red-30);background:var(--red-10);border-radius:4px;font-size:11px"><div style="font-weight:600;color:var(--red);margin-bottom:4px">'+title+' ('+rows.length+')</div><ul style="margin:0;padding-left:18px">'+rows.join('')+'</ul></div>';
+    }
     async function bulkRunChunked(action, mode, onProgress){
         const all=state.bulkJSON.products||[];
         const total=all.length;
@@ -528,10 +575,12 @@ const GH = (function() {
             const m=document.querySelector('input[name="bulk-mode"]:checked').value;
             const data=await bulkRunChunked('rp_cm_ajax_bulk_preview',m,(done,total)=>{ot.textContent='Anteprima '+done+' / '+total+'...';});
             const s=data.summary,a=document.getElementById('imp-preview-area');
-            let h='<table class="ptable"><thead><tr><th>Azione</th><th>Nome</th><th>SKU</th><th>Tipo</th><th>Varianti</th></tr></thead><tbody>';
-            for(const d of data.details){const ic=d.action==='create'?'st-create':'st-matched';const hc=d.hide_count?' <span style="color:var(--amb)" title="taglie da nascondere">\u2212'+d.hide_count+'</span>':'';h+='<tr><td class="'+ic+'">'+(d.action==='create'?'+ Nuovo':'\u21bb #'+d.existing_id)+'</td><td>'+esc(d.name)+'</td><td>'+esc(d.sku||'\u2013')+'</td><td>'+d.type+'</td><td>'+(d.variation_count||'\u2013')+hc+'</td></tr>'}
-            h+='</tbody></table>';a.innerHTML=h;
-            document.getElementById('imp-confirm-text').innerHTML='<span>'+(s.to_create||0)+'</span> da creare'+(s.to_update?', <span>'+s.to_update+'</span> da aggiornare':'')+(s.to_hide?', <span>'+s.to_hide+'</span> da nascondere':'');
+            let h='<table class="ptable"><thead><tr><th>Azione</th><th>Nome</th><th>SKU</th><th>Tipo</th><th>Varianti</th><th>Immagini</th></tr></thead><tbody>';
+            for(const d of data.details){const ic=d.action==='create'?'st-create':'st-matched';const hc=d.hide_count?' <span style="color:var(--amb)" title="taglie da nascondere">\u2212'+d.hide_count+'</span>':'';h+='<tr><td class="'+ic+'">'+(d.action==='create'?'+ Nuovo':'\u21bb #'+d.existing_id)+'</td><td>'+esc(d.name)+'</td><td>'+esc(d.sku||'\u2013')+'</td><td>'+d.type+'</td><td>'+(d.variation_count||'\u2013')+hc+'</td><td>'+bulkImgPlanCell(d.images)+'</td></tr>'}
+            h+='</tbody></table>'+bulkImgFailures(data.details,'plan');a.innerHTML=h;
+            const imgTxt=(s.img_existing||s.img_download)?' \u00b7 immagini: <span>'+(s.img_existing||0)+'</span> dalla libreria, <span>'+(s.img_download||0)+'</span> da scaricare':'';
+            const imgBad=s.img_invalid?', <span style="color:var(--red)">'+s.img_invalid+'</span> non valide':'';
+            document.getElementById('imp-confirm-text').innerHTML='<span>'+(s.to_create||0)+'</span> da creare'+(s.to_update?', <span>'+s.to_update+'</span> da aggiornare':'')+(s.to_hide?', <span>'+s.to_hide+'</span> da nascondere':'')+imgTxt+imgBad;
             document.getElementById('imp-confirm-bar').style.display='flex'
         }catch(e){toast('Errore anteprima: '+(e.message||e),'err',0)}
         finally{endRun();releaseWakeLock();ov.classList.remove('visible');btn.disabled=false;sp.style.display='none'}
@@ -545,10 +594,11 @@ const GH = (function() {
             const m=document.querySelector('input[name="bulk-mode"]:checked').value;
             const data=await bulkRunChunked('rp_cm_ajax_bulk_apply',m,(done,total)=>{ot.textContent='Creazione '+done+' / '+total+'...';});
             const s=data.summary,a=document.getElementById('imp-preview-area');
-            let h='<table class="ptable"><thead><tr><th>Risultato</th><th>ID</th><th>Nome</th><th>SKU</th><th>Varianti</th></tr></thead><tbody>';
-            for(const d of data.details){const c=d.status==='created'?'st-created':d.status==='updated'?'st-updated':'st-error';const hc=d.hidden?' <span style="color:var(--amb)" title="taglie nascoste">\u2212'+d.hidden+'</span>':'';h+='<tr><td class="'+c+'">'+(d.status==='created'?'+ Creato':d.status==='updated'?'\u2713 Agg.':'\u2717 Err')+'</td><td>'+(d.id||'\u2013')+'</td><td>'+esc(d.name||'')+'</td><td>'+esc(d.sku||'')+'</td><td>'+(d.variation_count||'\u2013')+hc+'</td></tr>'}
-            h+='</tbody></table>';a.innerHTML=h;document.getElementById('imp-confirm-bar').style.display='none';
-            toast((s.created||0)+' creati, '+(s.updated||0)+' aggiornati'+((s.hidden)?', '+s.hidden+' nascoste':'')+', '+(s.errors||0)+' errori',(s.errors)?'err':'ok',5000)
+            let h='<table class="ptable"><thead><tr><th>Risultato</th><th>ID</th><th>Nome</th><th>SKU</th><th>Varianti</th><th>Immagini</th></tr></thead><tbody>';
+            for(const d of data.details){const c=d.status==='created'?'st-created':d.status==='updated'?'st-updated':'st-error';const hc=d.hidden?' <span style="color:var(--amb)" title="taglie nascoste">\u2212'+d.hidden+'</span>':'';const rs=d.status==='error'&&d.reason?' <span style="color:var(--dim)">'+esc(d.reason)+'</span>':'';h+='<tr><td class="'+c+'">'+(d.status==='created'?'+ Creato':d.status==='updated'?'\u2713 Agg.':'\u2717 Err')+rs+'</td><td>'+(d.id||'\u2013')+'</td><td>'+esc(d.name||'')+'</td><td>'+esc(d.sku||'')+'</td><td>'+(d.variation_count||'\u2013')+hc+'</td><td>'+bulkImgResultCell(d.images)+'</td></tr>'}
+            h+='</tbody></table>'+bulkImgFailures(data.details,'result');a.innerHTML=h;document.getElementById('imp-confirm-bar').style.display='none';
+            const imgMsg=(s.img_reused||s.img_downloaded||s.img_failed)?' \u00b7 immagini: '+((s.img_reused||0)+(s.img_downloaded||0))+' collegate'+(s.img_failed?', '+s.img_failed+' fallite':''):'';
+            toast((s.created||0)+' creati, '+(s.updated||0)+' aggiornati'+((s.hidden)?', '+s.hidden+' nascoste':'')+', '+(s.errors||0)+' errori'+imgMsg,(s.errors||s.img_failed)?'err':'ok',s.img_failed?0:5000)
         }catch(e){toast('Errore import: '+(e.message||e),'err',0)}
         finally{endRun();releaseWakeLock();ov.classList.remove('visible');btn.disabled=false;sp.style.display='none'}
     }
@@ -574,10 +624,11 @@ const GH = (function() {
                 if(!st.success){ if(++misses>5){ot.textContent='Stato non disponibile — controlla il tab Jobs';break;} continue; }
                 misses=0;
                 const s=st.data.summary||{};
-                ot.textContent='Background: '+(s.processed||0)+' / '+(s.total||total)+'  ·  '+(s.created||0)+' creati, '+(s.updated||0)+' agg.'+((s.hidden)?', '+s.hidden+' nasc.':'')+', '+(s.errors||0)+' err.';
+                const bgImg=(s.img_reused||s.img_downloaded||s.img_failed)?'  ·  img: '+((s.img_reused||0)+(s.img_downloaded||0))+' ok'+(s.img_failed?', '+s.img_failed+' fallite':''):'';
+                ot.textContent='Background: '+(s.processed||0)+' / '+(s.total||total)+'  ·  '+(s.created||0)+' creati, '+(s.updated||0)+' agg.'+((s.hidden)?', '+s.hidden+' nasc.':'')+', '+(s.errors||0)+' err.'+bgImg;
                 if(st.data.done){
                     if(st.data.status==='error'){toast('Import in background fallito — vedi tab Jobs','err',0);}
-                    else{toast('Import completato: '+(s.created||0)+' creati, '+(s.updated||0)+' aggiornati'+((s.hidden)?', '+s.hidden+' nascoste':'')+', '+(s.errors||0)+' errori',(s.errors)?'err':'ok',6000);}
+                    else{const fi=s.img_failed?', '+s.img_failed+' immagini fallite':'';if(Array.isArray(s.img_failures)&&s.img_failures.length){document.getElementById('imp-preview-area').innerHTML=bulkImgFailures(s.img_failures.map(f=>({sku:f.sku,images:{failed:[f]}})),'result');}toast('Import completato: '+(s.created||0)+' creati, '+(s.updated||0)+' aggiornati'+((s.hidden)?', '+s.hidden+' nascoste':'')+', '+(s.errors||0)+' errori'+fi,(s.errors||s.img_failed)?'err':'ok',s.img_failed?0:6000);}
                     break;
                 }
             }

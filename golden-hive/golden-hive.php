@@ -47,6 +47,7 @@ require_once GH_DIR . 'includes/product/ajax.php';
 
 // Core — shared product creation
 require_once GH_DIR . 'includes/core/product-factory.php';
+require_once GH_DIR . 'includes/core/product-images.php';
 
 // Catalog — overview, taxonomy, export/import
 require_once GH_DIR . 'includes/catalog/reader.php';

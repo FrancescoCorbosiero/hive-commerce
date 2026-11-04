@@ -506,7 +506,9 @@ function gh_jobs_handler_bulk_import( array $job, array $context ): array {
         $w     = 0;
         while ( $cursor['offset'] < $total ) {
             $entry  = $products[ $cursor['offset'] ];
-            $weight = 1 + ( is_array( $entry['variations'] ?? null ) ? count( $entry['variations'] ) : 0 );
+            $weight = function_exists( 'gh_cm_bulk_entry_weight' )
+                ? gh_cm_bulk_entry_weight( $entry )
+                : 1 + ( is_array( $entry['variations'] ?? null ) ? count( $entry['variations'] ) : 0 );
             if ( $batch && ( $w + $weight ) > $budget ) break;
             $batch[] = $entry;
             $w      += $weight;
@@ -519,6 +521,18 @@ function gh_jobs_handler_bulk_import( array $job, array $context ): array {
         $cursor['updated'] += (int) ( $s['updated'] ?? 0 );
         $cursor['errors']  += (int) ( $s['errors']  ?? 0 );
         $cursor['hidden']  += (int) ( $s['hidden']  ?? 0 );
+        foreach ( [ 'img_reused', 'img_downloaded', 'img_failed' ] as $k ) {
+            $cursor[ $k ] = (int) ( $cursor[ $k ] ?? 0 ) + (int) ( $s[ $k ] ?? 0 );
+        }
+        // Dettaglio delle immagini non collegate (cap 50) — il polling UI lo
+        // mostra a fine job, i soli contatori non dicono QUALE URL è fallito.
+        $cursor['img_failures'] = (array) ( $cursor['img_failures'] ?? [] );
+        foreach ( (array) ( $res['details'] ?? [] ) as $d ) {
+            foreach ( (array) ( $d['images']['failed'] ?? [] ) as $f ) {
+                if ( count( $cursor['img_failures'] ) >= 50 ) break 2;
+                $cursor['img_failures'][] = [ 'sku' => (string) ( $d['sku'] ?? '' ), 'src' => (string) ( $f['src'] ?? '' ), 'reason' => (string) ( $f['reason'] ?? '' ) ];
+            }
+        }
     }
 
     gh_jobs_bulk_import_progress( $job['id'], $cursor );
@@ -534,6 +548,10 @@ function gh_jobs_handler_bulk_import( array $job, array $context ): array {
             'updated'   => $cursor['updated'],
             'errors'    => $cursor['errors'],
             'hidden'    => $cursor['hidden'] ?? 0,
+            'img_reused'     => $cursor['img_reused']     ?? 0,
+            'img_downloaded' => $cursor['img_downloaded'] ?? 0,
+            'img_failed'     => $cursor['img_failed']     ?? 0,
+            'img_failures'   => $cursor['img_failures']   ?? [],
         ],
     ];
 }
@@ -551,6 +569,10 @@ function gh_jobs_bulk_import_progress( string $job_id, array $cursor ): void {
         'updated'   => (int) ( $cursor['updated'] ?? 0 ),
         'errors'    => (int) ( $cursor['errors']  ?? 0 ),
         'hidden'    => (int) ( $cursor['hidden']  ?? 0 ),
+        'img_reused'     => (int) ( $cursor['img_reused']     ?? 0 ),
+        'img_downloaded' => (int) ( $cursor['img_downloaded'] ?? 0 ),
+        'img_failed'     => (int) ( $cursor['img_failed']     ?? 0 ),
+        'img_failures'   => array_slice( (array) ( $cursor['img_failures'] ?? [] ), 0, 50 ),
     ] ] );
 }
 
