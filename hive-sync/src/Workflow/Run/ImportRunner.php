@@ -624,6 +624,15 @@ final class ImportRunner
             $summary['healed_media'] = $healedMedia;
         }
 
+        // Which slice of the catalog this run imported, in words. Diff-
+        // level like `fetched`, so it rides every tick's report and the
+        // Storico row can say "solo Calzature" instead of leaving a
+        // category import indistinguishable from a full sync.
+        $categoryScope = \HiveSync\Sources\CategoryFilter::describe( $options['category_filter'] ?? null );
+        if ( $categoryScope !== '' ) {
+            $summary['categories'] = $categoryScope;
+        }
+
         // Selection accounting. `sku_missing` travels as a list (capped
         // for transport) rather than a bare count so the UI can name the
         // SKUs that weren't found — the operator needs to know WHICH of

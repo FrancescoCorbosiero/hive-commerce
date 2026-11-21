@@ -37,6 +37,8 @@ Stato attuale (branch `claude/stabilize-hive-sync-plugin-FZjmQ`):
 - ✅ Resilienza tick-loop: retry-with-backoff + cursor-resume su errori transienti
 - ✅ Limite "Max prodotti" sul Run tab per testare su feed grandi
 - ✅ **Oscuramento dei prodotti spariti dal feed** (`options.retire_missing`) — il 5° bucket, reversibile e con freno anti-feed-troncato
+- ✅ **Vista semplice per il cliente** (default) — Panoramica · Importa prodotti · Storico; tutto il resto dietro "Modalità avanzata". Vedi "Lessons learned / La vista semplice lavora per automazioni"
+- ✅ **Import per categoria** (StockFirmati) — picker CAT → SUBCAT con conteggi dal feed e "già nel negozio"; `category_filter` con path esatti. Vedi "Lessons learned / Import per categoria"
 
 ---
 
@@ -60,8 +62,10 @@ hive-sync/
 ├── hive-sync.php             Entry. Activation seeds defaults, plugins_loaded boots.
 ├── composer.json             PSR-4 HiveSync\ → src/
 ├── includes/
-│   ├── admin-page.php        Cockpit header + 10 tabs + panel HTML shells.
+│   ├── admin-page.php        Cockpit header + tab shells (3 semplici + 10 avanzati, data-advanced).
 │   ├── ajax.php              ~30 wp_ajax_hsync_* handlers, all guarded.
+│   ├── ajax-simple.php       Endpoint della vista semplice: overview, feed_settings_save,
+│   │                           feed_categories, import_params, run_cancel + hsync_job_import_target().
 │   ├── assets.php            Localize ajaxUrl + nonce + version.
 │   ├── cron.php              Heartbeat 'hive_sync_jobs_tick' every minute + drain budget + daily upkeep.
 │   ├── cron-fallback.php     admin_init throttled fallback (DISABLE_WP_CRON).
@@ -86,6 +90,8 @@ hive-sync/
 │   │   ├── AttributeMerger.php       Promotes mapped pa_* keys into $data['attributes'].
 │   │   ├── MissingMediaLookup.php    Batch "which pids have no usable featured image?".
 │   │   ├── OwnedProductLookup.php    Batch "which products in Woo belong to this feed?".
+│   │   ├── CategoryFilter.php        ★ `category_filter`: path esatti ("Cat > Sub" / "Cat > *")
+│   │   │                               + forma legacy a sottostringa; albero del picker. Pura.
 │   │   └── MarkupResolver.php        Per-rule markup evaluation (used by both sources).
 │   ├── Operations/
 │   │   ├── Status/SetStatus.php
@@ -136,7 +142,11 @@ hive-sync/
 │       ├── Export/Exporter.php             Inventory CSV/JSON + catalog-by-taxonomy.
 │       ├── Config/ProjectExporter.php      ★ Dumps DB → project.json (secrets redacted).
 │       ├── Config/ProjectApplier.php       ★ Validate/diff/apply project.json (atomic, prune-optional).
-│       └── Seed/Defaults.php               ★ Seeds 2 mappings + 6 pipelines + 2 default jobs.
+│       ├── Seed/Defaults.php               ★ Seeds 2 mappings + 6 pipelines + 2 default jobs.
+│       └── Simple/                         Vista semplice (tutto puro, unit-testato):
+│           ├── FeedOverview.php              job → card della Panoramica (cosa mostrare/nascondere).
+│           ├── SimpleSettings.php            preset frequenza + "aggiungi nuovi" ↔ buckets.
+│           └── FeedCategorySnapshot.php      cache compatta SKU → categoria del feed.
 └── assets/
     ├── css/admin.css                       Cockpit styling, sticky tabs, HUD stats.
     └── js/admin.js                         Single HSync namespace, no jQuery, ~2700 LOC.
@@ -525,22 +535,34 @@ le sync di produzione e le riportava alla cadenza di default.
 
 ---
 
-## Tab UI (10 tabs)
+## Tab UI — vista semplice + modalità avanzata
 
-Numerati 1-6 per il workflow primario, poi 4 utility:
+Il cliente finale non è un tecnico: di default vede **tre tab**. Lo
+switch "Modalità avanzata" nell'header (preferenza per browser,
+`localStorage['hsync.advanced']`) mostra anche i dieci tab tecnici.
+Ogni elemento tecnico porta `data-advanced` ed è nascosto via CSS
+finché `#hsync-app` non ha `.is-advanced`; il markup parte in modalità
+semplice, così niente di tecnico lampeggia prima del JS.
 
-| # | Tab | data-tab | Scopo |
+| Vista | Tab | data-tab | Scopo |
 |---|---|---|---|
-| 1 | 🔌 Connetti | `sources` | Saved source-configs (URL + auth) per sorgente |
-| 2 | 🗺 Mappa | `mappings` | Visual mapping spina-Woo + Avanzati + Custom |
-| 3 | ⚙ Componi | `pipelines` | CRUD pipeline (pre-check / import-rule / post-check) |
-| 4 | 🎯 Regole | `rules` | Scoped operations su prodotti esistenti |
-| 5 | ▶ Importa | `run` | Esecuzione ad-hoc con dry-run |
-| 6 | ⏱ Automatizza | `jobs` | Schedule cron + Action Scheduler health |
-| — | 🖼 Media | `media` | Browser + Safe Cleanup orfani + **Prodotti senza immagine** (scan + ripara) |
-| — | ⬇ Esporta | `exports` | Inventario CSV/JSON + catalog by taxonomy |
-| — | 📜 Storico | `runs` | Audit log delle ultime esecuzioni |
-| — | ⚠ Strumenti | `tools` | Nuclear Cleanup (manage_options gate) |
+| sempre | Panoramica | `home` | Riga di stato ("Tutto in ordine" / cosa controllare) + una card per automazione: accesa/spenta, frequenza (preset), "aggiungi da sola i nuovi prodotti", Sincronizza ora / Interrompi, ultimo esito in parole |
+| sempre | Importa prodotti | `import` | Fornitore → tutto il catalogo **o solo alcune categorie** (picker) → un bottone; progresso, Interrompi, Riprendi |
+| sempre | Storico | `runs` | In semplice: quando / cosa (+ "solo Calzature") / esito / risultato in parole. In avanzata: le colonne tecniche + pulizia |
+| avanzata | 1 Connetti | `sources` | Saved source-configs (URL + auth) per sorgente |
+| avanzata | 2 Mappa | `mappings` | Visual mapping spina-Woo + Avanzati + Custom |
+| avanzata | 3 Componi | `pipelines` | CRUD pipeline (pre-check / import-rule / post-check) |
+| avanzata | 4 Regole | `rules` | Scoped operations su prodotti esistenti |
+| avanzata | 5 Import manuale | `run` | Esecuzione ad-hoc con tutte le opzioni (dry-run, limiti, SKU, modi, spazzata) |
+| avanzata | 6 Automatizza | `jobs` | Schedule cron + Action Scheduler health |
+| avanzata | Media | `media` | Browser + Safe Cleanup orfani + **Prodotti senza immagine** (scan + ripara) |
+| avanzata | Esporta | `exports` | Inventario CSV/JSON + catalog by taxonomy |
+| avanzata | Strumenti | `tools` | Nuclear Cleanup (manage_options gate) |
+| avanzata | Config | `config` | project.json: esporta / valida / applica |
+
+`HSync.switchTab()` riporta alla Panoramica qualunque tab tecnico
+richiesto in modalità semplice (link vecchi, "goto", switch appena
+spento): mai un pannello nascosto attivo.
 
 ---
 
@@ -555,6 +577,17 @@ ritorna in una call:
 
 Refresh automatico ogni 30s. Bottone "Esegui ciclo automatizzazioni"
 forza un dispatch immediato senza attendere il cron.
+
+Tile e bottone esistono **solo in modalità avanzata**. In quella
+semplice l'header è nome + switch, e lo stato vive nella riga in cima
+alla Panoramica (che legge lo stesso `cockpit_status` + `system_status`).
+Il banner rosso WP-Cron dell'header è anch'esso solo avanzato: la
+Panoramica ne mostra la versione a parole ("le sincronizzazioni non
+stanno partendo…", con il crontab in "Dettagli per il tecnico"), e solo
+se almeno un'automazione è accesa. Problema = nessun heartbeat
+pianificato **o** in ritardo di oltre 10 minuti: un tick in ritardo di
+pochi secondi è normale (WP-Cron scatta alla richiesta successiva) e
+prima veniva segnalato come "nessun evento pianificato".
 
 ---
 
@@ -649,6 +682,7 @@ disinstalla. Cosa scrive e come si pulisce:
 | 6 options (`hsync_db_version`, `hsync_migrated_gs_to_json`, `hsync_migrated_scheduler_v2`, `hsync_media_whitelist`, `hsync_media_deletion_log`, `hsync_runner_lease`) | `wp_options` | `delete_option` in `uninstall.php` (la lease anche in deactivation) |
 | transients (usage index, RunCache `hsync_run_cache_<id>`, tick lock pre-1.2) | `wp_options` (transient_*) | `delete_transient` / wildcard in `uninstall.php` + deactivation |
 | `hsync_runs_pruned_today` | transient | Auto-expires DAY_IN_SECONDS |
+| `hsync_feed_cats_<md5(sorgente/config)>` | transient (snapshot SKU → categoria del picker) | Scade da sola (`HSYNC_FEED_CATS_TTL`, 30 min) + wildcard in `uninstall.php` |
 | WP-Cron event `hive_sync_jobs_tick` | `cron` option | `wp_clear_scheduled_hook` in deactivation + uninstall |
 | File su disk | nessuno | n/a — non scriviamo file standalone (le immagini sideloaded vivono nella WP media library standard) |
 
@@ -1247,6 +1281,124 @@ concorrenti per 8 round — 400 SKU, 400 scritture, zero doppioni.
 Coperto da `tests/Unit/Workflow/Schedule/*` (lease, drain, due policy,
 slot, DST) e `RunTotalsTest`, `RunCacheTest` (touch).
 
+### La vista semplice lavora per automazioni
+
+**Richiesta:** il cliente finale non è uno sviluppatore. Dieci tab con
+sorgenti, mappature, flussi, bucket, cron e JSON gli servono a nulla e
+lo espongono a errori. Serve "poco ma efficace".
+
+**Decisione: non si è tolto niente, si è nascosto.** Tutto ciò che
+esisteva resta identico dietro "Modalità avanzata" (lo sviluppatore lo
+usa ancora); la vista di default ne è un sottoinsieme in parole.
+
+**Il punto non ovvio: la vista semplice non chiede mai sorgente,
+mappatura o flusso.** Lavora per *automazioni*: un job `source.import`
+porta già la quadrupla giusta (sorgente, config salvata, mapping,
+pipeline) e il server la risolve (`hsync_job_import_target()`, stessa
+risoluzione di `JobRunner::dispatchSourceImport`, `config.config_slug`
+compreso). Stessa ragione della riparazione immagini del tab Media: chi
+ri-sceglie i parametri può sceglierli *diversamente* dalla sync vera e
+riscrivere i prodotti con il mapping sbagliato.
+
+Invarianti:
+
+- **Una card mostra un controllo solo per una forma che sa rileggere.**
+  `SimpleSettings`: la frequenza è un preset (`presetFor`), "aggiungi da
+  sola i nuovi prodotti" è `buckets` assente ↔ `['update','updateStock']`.
+  Un cron scritto a mano si vede come "personalizzata" e resta com'è
+  finché il cliente non sceglie un preset; un set di bucket fatto a mano
+  (`['updateStock']`) viene **rifiutato** dal server, mai appiattito.
+- **Le card nascondono i job non configurati e spenti** (il seeder crea
+  GS + SF su ogni installazione: chi compra da un solo fornitore non deve
+  vedere una card morta), ma **mostrano** quelli non configurati e accesi:
+  falliscono a ogni slot ed è proprio ciò che il cliente deve sapere.
+- **Mai credenziali al browser.** `FeedOverview` non manda la config del
+  job; un job con config *inline* non è importabile dalla vista semplice
+  (le credenziali dovrebbero viaggiare a ogni tick).
+- **"Aggiungi da sola i nuovi prodotti" spento è il modello per un
+  catalogo curato:** la sync mantiene prezzi/stock e nasconde i delistati
+  (la spazzata gira sul feed **intero**, quindi resta sicura), e i nuovi
+  prodotti entrano solo da "Importa prodotti", anche per categoria. Per
+  questo la vista semplice **non** offre il filtro categorie sui job: un
+  job con `category_filter` disattiva la spazzata (vedi sotto) e lo SKU
+  delistato tornerebbe acquistabile — il bug che il cliente ci ha già
+  segnalato una volta.
+
+**Il tick loop ha un listener, non un fork.** "Importa prodotti" usa lo
+stesso `HSync.runImportTicked` di Import manuale e della riparazione
+immagini (retry/backoff/resume restano in un posto solo) e ne disegna il
+progresso tramite `HSync.runListener(phase, payload)` con fasi
+`start` / `tick` / `end`. Regola di proprietà come `runOutputSel`: chi
+*avvia* un run lo imposta o lo azzera. "Interrompi" alza
+`HSync.state.runAbort`, letto **tra due tick** e durante il backoff dei
+retry; il run viene chiuso subito con `run_cancel` (solo run del browser:
+quello di un job appartiene allo scheduler e si ferma con `job_stop`),
+altrimenti la riga resterebbe "In corso" per un giorno.
+
+### Import per categoria — path esatti, non sottostringhe
+
+**Richiesta:** importare (StockFirmati) solo i prodotti di una categoria.
+Il motore aveva già `options.category_filter`, ma senza UI e con una
+semantica a **sottostringa** su CAT *o* SUBCAT: "Borse" prendeva anche
+"Accessori › Borse da viaggio", "Top" ogni "Laptop". Con un picker che
+mostra un **conteggio** accanto a ogni categoria è inaccettabile: il
+numero sullo schermo non sarebbe il numero importato.
+
+**Soluzione (`CategoryFilter`):** due forme in un'unica opzione.
+
+| Voce | Significato |
+|---|---|
+| `"Calzature > Sneakers"` | esattamente quella coppia categoria/sottocategoria |
+| `"Calzature > *"` | tutta la categoria, qualunque sottocategoria (anche vuota) |
+| `"sneak"` | legacy: sottostringa della categoria **o** della sottocategoria |
+
+Il picker scrive solo path; la forma legacy resta identica, quindi un
+job scritto a mano continua a importare gli stessi prodotti (nessun
+filtro legacy funzionante poteva contenere `>`, che non compare mai in
+un singolo livello). Confronto case-insensitive, Unicode-aware, spazi
+collassati. È lo stesso albero a due livelli che `gh_sf_assign_category`
+trasforma in product_cat padre/figlio: ciò che il cliente vede in Woo.
+
+**Il picker:** `feed_categories` scarica e trasforma il feed (stesso
+costo del tick 1 di un import, quindi fatal guard + limiti alzati) e ne
+salva uno snapshot compatto SKU → (CAT, SUBCAT) (`FeedCategorySnapshot`,
+transient per feed, 30 min). "Già nel negozio" **non** è in cache: è ciò
+che cambia appena finisce un import, e si ricalcola a ogni richiesta con
+una lookup batch (`SkuLookup`). Così dopo aver importato Borse il picker
+dice subito "Borse — già tutti nel negozio" senza riscaricare il feed.
+
+Invarianti:
+
+- **Il conteggio è il numero importato.** `SfCategoryFilterTest::testThePickerTreeAndTheFilterAgreeOnEveryNode`
+  rimanda ogni nodo dell'albero dentro `fetch()` e confronta: se i due
+  divergono, il test fallisce. `categoryPath()` (AbstractSource, default
+  `null`; CsvSource la implementa per il flavor SF) e il filtro devono
+  leggere gli stessi campi.
+- **Un filtro che non trova niente lo dice.** Zero prodotti su N è quasi
+  sempre una categoria rinominata dal fornitore: warning esplicito,
+  altrimenti un job filtrato importerebbe zero per sempre con run verdi.
+- **Un import per categoria non chiede la spazzata.** Su una fetta del
+  feed `MissingSweeper` si rifiuterebbe comunque (tutto il resto
+  risulterebbe sparito): `import_params` toglie `retire_*` così il
+  cliente non legge un avviso incomprensibile. I *ripristini* girano
+  comunque, su ogni sync.
+- **Lo Storico dice la fetta.** `summary.categories` (diff-level, viaggia
+  su ogni tick) → "importazione manuale · solo Calzature".
+
+Solo StockFirmati ha un albero di categorie nel feed: GS ha solo
+l'euristica sneakers/abbigliamento, e il picker non viene offerto
+(`hasCategories()` false). Il CSV generico mantiene il filtro legacy sui
+`categories` mappati.
+
+**Verificato** end-to-end fuori repo: pagina admin reale + handler AJAX
+reali su MariaDB (`$wpdb` minimale su mysqli, bridge SF finto che scrive
+`wp_posts`/`wp_postmeta`), seeder vero, `ImportRunner` vero, guidati da
+Playwright — picker, import per categoria (conteggi = prodotti creati),
+"già nel negozio" aggiornato, Interrompi tra tick e durante i retry,
+502 iniettati + Riprendi (totali sommati sui due segmenti), Sincronizza
+ora via scheduler + lease, switch di modalità, larghezza telefono. Coperto
+da `CategoryFilterTest`, `SfCategoryFilterTest`, `Workflow/Simple/*`.
+
 ---
 
 ## What NOT to add
@@ -1266,3 +1418,12 @@ slot, DST) e `RunTotalsTest`, `RunCacheTest` (touch).
 - **Match tassonomia Woo nelle markup_rules** — match feed-field è
   più veloce, equivalente per catalog feed-driven, e funziona per
   prodotti non ancora in Woo.
+- **Filtro categorie sui job nella vista semplice** — un job con
+  `category_filter` disattiva la spazzata dei delistati (il feed visto è
+  una fetta): lo SKU tolto dal fornitore tornerebbe acquistabile. Il
+  catalogo curato si fa con "aggiungi da sola i nuovi prodotti" spento +
+  import per categoria. Vedi "Lessons learned / La vista semplice lavora
+  per automazioni".
+- **Controlli tecnici nella vista semplice** (cron, bucket, limiti,
+  dry-run, mapping, JSON): vanno nei tab avanzati. Ogni controllo in più
+  per il cliente è un modo in più di rompere la sync.

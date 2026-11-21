@@ -6,18 +6,38 @@ Hive Commerce is active, Hive Sync delegates `materialize` to the legacy
 bridge (`hive_sync/host/*` filters) for variant + media sideload
 logic; without it falls back to a generic Woo upsert.
 
-## Quickstart for the operator
+## Per il cliente (vista semplice, default)
+
+Tre tab, nient'altro:
+
+- **Panoramica** — "Tutto in ordine" (o cosa controllare) e una scheda per
+  fornitore: accesa/spenta, ogni quanto, *aggiungi da sola i nuovi prodotti*,
+  **Sincronizza ora**, ultimo risultato in parole.
+- **Importa prodotti** — scegli il fornitore e **tutto il catalogo o solo
+  alcune categorie** (StockFirmati: elenco categoria → sottocategoria con
+  quanti prodotti ha il fornitore e quanti sono già nel negozio), poi un
+  bottone. Progresso, Interrompi, Riprendi.
+- **Storico** — quando, cosa (anche "solo Calzature"), esito, risultato.
+
+Catalogo curato: spegni *aggiungi da sola i nuovi prodotti* sulla scheda
+(la sync aggiorna prezzi/disponibilità dei prodotti già nel negozio e
+nasconde quelli che il fornitore non vende più) e porta dentro le
+categorie che vuoi da **Importa prodotti**.
+
+## Quickstart (sviluppatore, Modalità avanzata)
 
 1. Install + activate the plugin. Defaults are seeded automatically.
-2. **Connetti** → "JSON" card → compila URL + token, salva con un nome
-   (es. `gs-prod`), premi **Test fetch** per verificare le credenziali.
-3. **Mappa** → premi **Aggiorna default** se hai installato prima del
+2. Header → accendi **Modalità avanzata**.
+3. **Connetti** → card della sorgente → compila URL + token, salva con lo
+   slug che il job default si aspetta (`gs-prod` per JSON/GS, `sf-prod`
+   per CSV/StockFirmati), premi **Test fetch**.
+4. **Mappa** → premi **Aggiorna default** se hai installato prima del
    commit `46dbc00` (porta in-line le ultime modifiche al codice).
-4. **Importa** → scegli sorgente / mapping / pipeline → tieni acceso
+5. **Import manuale** → scegli sorgente / mapping / pipeline → tieni acceso
    *Solo prova* per la prima run, controlla lo Storico, poi togli e
    lancia per davvero.
-5. **Automatizza** → quando il primo import a mano è andato bene, accendi
-   i 3 job default (`gs-add-new`, `gs-refresh-stocks`, `gs-re-update`).
+6. Spegni la Modalità avanzata: il cliente accende la sincronizzazione
+   dalla Panoramica.
 
 ## Cosa fa, in due righe
 
@@ -59,24 +79,38 @@ Su un catalog di 5K prodotti con 50 nuovi e 4950 da rinfrescare:
 
 Tempo totale ~4 minuti vs ~5 ore per un re-import completo.
 
-## Tab UI (10 tabs)
+## Tab UI
 
-| # | Tab | Cosa contiene |
+| Vista | Tab | Cosa contiene |
 |---|---|---|
-| 1 | 🔌 Connetti | Saved source-configs (URL + auth) per sorgente |
-| 2 | 🗺 Mappa | Mapping editor visuale: spina-Woo + Avanzati + Custom |
-| 3 | ⚙ Componi | CRUD pipeline (pre-check / import-rule / post-check) |
-| 4 | 🎯 Regole | Operazioni scoped su prodotti esistenti |
-| 5 | ▶ Importa | Esecuzione ad-hoc con dry-run |
-| 6 | ⏱ Automatizza | Schedule cron + Action Scheduler health |
-| — | 🖼 Media | Browser + whitelist + Safe Cleanup orfani |
-| — | ⬇ Esporta | Inventario CSV/JSON + catalog by taxonomy |
-| — | 📜 Storico | Audit log delle ultime esecuzioni |
-| — | ⚠ Strumenti | Nuclear Cleanup (richiede `manage_options`) |
+| sempre | Panoramica | Stato + una scheda per automazione (on/off, frequenza, nuovi prodotti, Sincronizza ora) |
+| sempre | Importa prodotti | Tutto il catalogo o solo alcune categorie, con progresso |
+| sempre | Storico | Esecuzioni in parole (avanzata: colonne tecniche + pulizia) |
+| avanzata | 1 Connetti | Saved source-configs (URL + auth) per sorgente |
+| avanzata | 2 Mappa | Mapping editor visuale: spina-Woo + Avanzati + Custom |
+| avanzata | 3 Componi | CRUD pipeline (pre-check / import-rule / post-check) |
+| avanzata | 4 Regole | Operazioni scoped su prodotti esistenti |
+| avanzata | 5 Import manuale | Esecuzione ad-hoc con tutte le opzioni (dry-run, limiti, SKU…) |
+| avanzata | 6 Automatizza | Schedule cron + Action Scheduler health |
+| avanzata | Media | Browser + whitelist + Safe Cleanup orfani |
+| avanzata | Esporta | Inventario CSV/JSON + catalog by taxonomy |
+| avanzata | Strumenti | Nuclear Cleanup (richiede `manage_options`) |
+| avanzata | Config | project.json: esporta / valida / applica |
 
-Sopra i tab: header dashboard ("cockpit") con tile live-status:
-automazioni attive / ultimo import / catalogo Woo / quick-tick button.
-Refresh automatico ogni 30s.
+La Modalità avanzata è uno switch nell'header, ricordato per browser.
+Solo in avanzata: il "cockpit" con tile live-status (automazioni attive /
+ultimo import / catalogo Woo / quick-tick button, refresh ogni 30s).
+
+### `category_filter` (job e Import manuale)
+
+```
+"category_filter": ["Calzature > Sneakers", "Borse > *"]   // path esatti (ciò che scrive il picker)
+"category_filter": "sneak"                                  // legacy: sottostringa di CAT o SUBCAT
+```
+
+Solo il flavor StockFirmati ha un albero di categorie. Un run con
+filtro vede una fetta del feed: la spazzata dei prodotti delistati non
+gira (lo dice nel report), i ripristini sì.
 
 ## Sources
 

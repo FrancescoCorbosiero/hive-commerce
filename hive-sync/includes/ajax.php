@@ -540,7 +540,7 @@ add_action( 'wp_ajax_hsync_ajax_run_now', function () {
                 'message' => sprintf(
                     'L\'automazione «%s» sta già importando questo feed (run #%d in corso). '
                     . 'Due import dello stesso feed in parallelo possono creare prodotti doppi: '
-                    . 'attendi che finisca oppure interrompila dal tab Automatizza.',
+                    . 'attendi che finisca oppure fermala con «Interrompi» sulla sua scheda.',
                     hsync_job_label( $busy ),
                     \HiveSync\Workflow\Schedule\RunState::runId( $busy['run_state'] ?? null )
                 ),
@@ -639,16 +639,7 @@ function hsync_job_running_feed( string $sourceId, string $configSlug ): ?array 
  * cursor.
  */
 function hsync_job_run_public( ?array $state ): ?array {
-    if ( ! \HiveSync\Workflow\Schedule\RunState::isRunning( $state ) ) return null;
-    return [
-        'trigger'       => (string) ( $state['trigger'] ?? '' ),
-        'slot_at'       => $state['slot_at'] ?? null,
-        'started_at'    => $state['started_at'] ?? null,
-        'last_slice_at' => $state['last_slice_at'] ?? null,
-        'slices'        => (int) ( $state['slices'] ?? 0 ),
-        'run_id'        => \HiveSync\Workflow\Schedule\RunState::runId( $state ),
-        'progress'      => is_array( $state['progress'] ?? null ) ? $state['progress'] : null,
-    ];
+    return \HiveSync\Workflow\Schedule\RunState::publicView( $state );
 }
 
 add_action( 'wp_ajax_hsync_ajax_jobs_list', function () {
@@ -682,6 +673,31 @@ add_action( 'wp_ajax_hsync_ajax_jobs_list', function () {
     ] );
 } );
 
+/**
+ * next_run_at for a job about to be saved with $cron / $enabled.
+ *
+ * Re-plans the slot only when the SCHEDULE changed — a new cron, or the
+ * job switched on (a job paused for a week must not fire the moment it
+ * is re-enabled). Saving any other field keeps the planned slot,
+ * including the one a running job is measured against. Slots are read
+ * in the site timezone. Shared by the job editor and the simple view's
+ * automation card, so both arm the schedule the same way.
+ *
+ * @param array<string, mixed>|null $existing hydrated job row, null when new
+ */
+function hsync_plan_next_run_at( ?array $existing, string $cron, bool $enabled ): ?string {
+    if ( $cron === '' ) return null;
+    $next        = $existing['next_run_at'] ?? null;
+    $cronChanged = (string) ( $existing['cron_expr'] ?? '' ) !== $cron;
+    $switchedOn  = $enabled && empty( $existing['enabled'] );
+    if ( ! $existing || $cronChanged || $switchedOn || $next === null ) {
+        $next = \HiveSync\Workflow\Schedule\JobSchedule::formatUtc(
+            \HiveSync\Workflow\Schedule\JobSchedule::forSite()->nextAfter( $cron, time() )
+        );
+    }
+    return $next;
+}
+
 add_action( 'wp_ajax_hsync_ajax_job_save', function () {
     hsync_ajax_guard();
     $cron = hsync_post_text( 'cron_expr' );
@@ -703,23 +719,7 @@ add_action( 'wp_ajax_hsync_ajax_job_save', function () {
     $config = hsync_post_json( 'config' );
     foreach ( \HiveSync\Workflow\Schedule\RunState::RUNTIME_CONFIG_KEYS as $k ) unset( $config[ $k ] );
 
-    // Re-plan the slot only when the SCHEDULE changed — a new cron, or
-    // the job switched on (a job paused for a week must not fire the
-    // moment it is re-enabled). Saving any other field keeps the planned
-    // slot, including the one a running job is measured against. Slots
-    // are read in the site timezone.
-    $next = $existing['next_run_at'] ?? null;
-    if ( $cron === '' ) {
-        $next = null;
-    } else {
-        $cronChanged = (string) ( $existing['cron_expr'] ?? '' ) !== $cron;
-        $switchedOn  = $enabled && empty( $existing['enabled'] );
-        if ( ! $existing || $cronChanged || $switchedOn || $next === null ) {
-            $next = \HiveSync\Workflow\Schedule\JobSchedule::formatUtc(
-                \HiveSync\Workflow\Schedule\JobSchedule::forSite()->nextAfter( $cron, time() )
-            );
-        }
-    }
+    $next = hsync_plan_next_run_at( $existing, $cron, $enabled );
 
     $saved = $repo->save( [
         'id'            => $id,
@@ -1068,47 +1068,15 @@ add_action( 'wp_ajax_hsync_ajax_media_missing_scan', function () {
 add_action( 'wp_ajax_hsync_ajax_media_missing_repair_params', function () {
     hsync_ajax_guard();
 
-    $jobId = (int) hsync_post_text( 'job_id' );
-    if ( $jobId <= 0 ) {
-        wp_send_json_error( [ 'message' => 'job_id richiesto.' ] );
-    }
-
-    $job = ( new \HiveSync\Core\Repo\JobRepository() )->find( $jobId );
-    if ( ! $job ) {
-        wp_send_json_error( [ 'message' => "Job #{$jobId} non trovato." ] );
-    }
-    if ( (string) ( $job['runnable_type'] ?? '' ) !== 'source.import' ) {
-        wp_send_json_error( [ 'message' => 'Il job selezionato non è un import.' ] );
-    }
-
-    // runnable_ref is '<source_id>/<config_slug>' — the same split the
-    // JobRunner does at dispatch.
-    $ref = (string) ( $job['runnable_ref'] ?? '' );
-    if ( ! str_contains( $ref, '/' ) ) {
-        wp_send_json_error( [ 'message' => "runnable_ref malformato: '{$ref}'." ] );
-    }
-    [ $sourceId, $configSlug ] = explode( '/', $ref, 2 );
-
-    $jobConfig = (array) ( $job['config'] ?? [] );
-    $options   = (array) ( $jobConfig['options'] ?? [] );
-
-    // Fail loudly on a job pointing at a deleted config: running with an
+    // Source + saved config + mapping resolved exactly as JobRunner does
+    // (shared with the simple view's Importa — see ajax-simple.php). It
+    // fails loudly on a job pointing at a deleted config: running with an
     // empty config would report a clean "done / 0 repaired" that is
     // indistinguishable from "nothing was broken".
-    $stored = ( new \HiveSync\Core\Repo\SourceConfigRepository() )->find( (string) $configSlug );
-    if ( ! $stored ) {
-        wp_send_json_error( [ 'message' => "Configurazione '{$configSlug}' non trovata (il job punta a una config cancellata)." ] );
-    }
-
-    // Resolve mapping_slug → the mapping config, exactly as JobRunner
-    // does, so the repair writes with the same field mapping the real
-    // import uses.
-    if ( empty( $options['mapping'] ) && ! empty( $options['mapping_slug'] ) ) {
-        $mapping = ( new \HiveSync\Core\Repo\MappingRepository() )->find( (string) $options['mapping_slug'] );
-        if ( $mapping ) {
-            $options['mapping'] = (array) $mapping['config'];
-        }
-    }
+    $target     = hsync_job_import_target( (int) hsync_post_text( 'job_id' ) );
+    $sourceId   = $target['source_id'];
+    $configSlug = $target['config_slug'];
+    $options    = $target['options'];
 
     // Force the repair shape on top of the job's own options:
     //  - heal_media: the whole point.
