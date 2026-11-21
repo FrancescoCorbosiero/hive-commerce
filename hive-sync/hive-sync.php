@@ -36,6 +36,7 @@ require_once HSYNC_DIR . 'includes/host-adapter.php';
 require_once HSYNC_DIR . 'includes/admin-page.php';
 require_once HSYNC_DIR . 'includes/assets.php';
 require_once HSYNC_DIR . 'includes/ajax.php';
+require_once HSYNC_DIR . 'includes/ajax-simple.php';
 require_once HSYNC_DIR . 'includes/cron.php';
 require_once HSYNC_DIR . 'includes/cron-fallback.php';
 

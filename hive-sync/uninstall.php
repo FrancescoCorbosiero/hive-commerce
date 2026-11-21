@@ -82,6 +82,12 @@ foreach ( $transients as $key ) {
 $wpdb->query( "DELETE FROM `{$wpdb->options}` WHERE option_name LIKE '\\_transient\\_hsync\\_run\\_cache\\_%' ESCAPE '\\\\'" );
 $wpdb->query( "DELETE FROM `{$wpdb->options}` WHERE option_name LIKE '\\_transient\\_timeout\\_hsync\\_run\\_cache\\_%' ESCAPE '\\\\'" );
 
+// 3c. The category picker's per-feed snapshots (`hsync_feed_cats_<md5>`,
+// see includes/ajax-simple.php). They expire on their own within the
+// hour; deleting them here just keeps uninstall leaving nothing behind.
+$wpdb->query( "DELETE FROM `{$wpdb->options}` WHERE option_name LIKE '\\_transient\\_hsync\\_feed\\_cats\\_%' ESCAPE '\\\\'" );
+$wpdb->query( "DELETE FROM `{$wpdb->options}` WHERE option_name LIKE '\\_transient\\_timeout\\_hsync\\_feed\\_cats\\_%' ESCAPE '\\\\'" );
+
 // 4. Clear the cron hook entirely (handles edge cases where
 //    deactivation didn't fire — e.g. WP-CLI uninstall on a
 //    deactivated plugin). 'hive_sync_jobs_tick' is the real hook;

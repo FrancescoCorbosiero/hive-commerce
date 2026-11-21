@@ -85,6 +85,7 @@ class ComposerStaticInit8ec97cf8e32aa119124e2c238cc20b92
         'HiveSync\\Operations\\Taxonomy\\AutoCategorize' => __DIR__ . '/../..' . '/src/Operations/Taxonomy/AutoCategorize.php',
         'HiveSync\\Operations\\Taxonomy\\ResolveTaxonomy' => __DIR__ . '/../..' . '/src/Operations/Taxonomy/ResolveTaxonomy.php',
         'HiveSync\\Sources\\AttributeMerger' => __DIR__ . '/../..' . '/src/Sources/AttributeMerger.php',
+        'HiveSync\\Sources\\CategoryFilter' => __DIR__ . '/../..' . '/src/Sources/CategoryFilter.php',
         'HiveSync\\Sources\\CsvSource' => __DIR__ . '/../..' . '/src/Sources/CsvSource.php',
         'HiveSync\\Sources\\JsonSource' => __DIR__ . '/../..' . '/src/Sources/JsonSource.php',
         'HiveSync\\Sources\\KicksDbSource' => __DIR__ . '/../..' . '/src/Sources/KicksDbSource.php',
@@ -122,6 +123,9 @@ class ComposerStaticInit8ec97cf8e32aa119124e2c238cc20b92
         'HiveSync\\Workflow\\Schedule\\RunnerLease' => __DIR__ . '/../..' . '/src/Workflow/Schedule/RunnerLease.php',
         'HiveSync\\Workflow\\Schedule\\SchedulerMigration' => __DIR__ . '/../..' . '/src/Workflow/Schedule/SchedulerMigration.php',
         'HiveSync\\Workflow\\Seed\\Defaults' => __DIR__ . '/../..' . '/src/Workflow/Seed/Defaults.php',
+        'HiveSync\\Workflow\\Simple\\FeedCategorySnapshot' => __DIR__ . '/../..' . '/src/Workflow/Simple/FeedCategorySnapshot.php',
+        'HiveSync\\Workflow\\Simple\\FeedOverview' => __DIR__ . '/../..' . '/src/Workflow/Simple/FeedOverview.php',
+        'HiveSync\\Workflow\\Simple\\SimpleSettings' => __DIR__ . '/../..' . '/src/Workflow/Simple/SimpleSettings.php',
     );
 
     public static function getInitializer(ClassLoader $loader)

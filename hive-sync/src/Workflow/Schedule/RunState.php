@@ -127,4 +127,26 @@ final class RunState
         }
         return max( 0, $id );
     }
+
+    /**
+     * What a browser may see of a run in flight — never the snapshot (it
+     * carries the job config, inline credentials included) nor the raw
+     * cursor. null when the job is idle.
+     *
+     * @param array<string, mixed>|null $state
+     * @return array{trigger: string, slot_at: mixed, started_at: mixed, last_slice_at: mixed, slices: int, run_id: int, progress: ?array}|null
+     */
+    public static function publicView( ?array $state ): ?array
+    {
+        if ( ! self::isRunning( $state ) ) return null;
+        return [
+            'trigger'       => (string) ( $state['trigger'] ?? '' ),
+            'slot_at'       => $state['slot_at'] ?? null,
+            'started_at'    => $state['started_at'] ?? null,
+            'last_slice_at' => $state['last_slice_at'] ?? null,
+            'slices'        => (int) ( $state['slices'] ?? 0 ),
+            'run_id'        => self::runId( $state ),
+            'progress'      => is_array( $state['progress'] ?? null ) ? $state['progress'] : null,
+        ];
+    }
 }

@@ -21,7 +21,7 @@
             rules: [],
             jobs: [],
             registry: { operations: [], checks: [] },
-            currentTab: 'sources',
+            currentTab: 'home',
             editingMapping: null,
             editingPipeline: null,
             editingRule: null,
@@ -276,6 +276,9 @@
     };
 
     HSync.renderCockpit = function (data) {
+        // The Panoramica's status line reads the product count from here.
+        HSync.state.cockpit = data;
+        if (HSync.state.currentTab === 'home' && HSync.state.overview) HSync.renderHomeStatus();
         const set = (k, html, sub) => {
             const el = document.querySelector('[data-cockpit="' + k + '"]');
             if (el) el.innerHTML = html;
@@ -309,7 +312,9 @@
         }
 
         // ── Tile: Catalog ────────────────────────────────────────
-        set('products', String(data.product_count || 0), 'prodotti pubblicati');
+        // Every product but trash / auto-draft — drafts included, so
+        // "pubblicati" would have overstated it.
+        set('products', String(data.product_count || 0), 'prodotti nel catalogo');
     };
 
     /**
@@ -351,10 +356,16 @@
         if (!region) return;
         try {
             const s = await HSync.ajax('system_status', {});
-            // Healthy when: next tick is in the future + not overdue.
-            // The DISABLE_WP_CRON case is informational, not a problem
-            // by itself — but combined with overdue it's the smoking gun.
-            if (!s.overdue && s.next_tick_in_sec !== null && s.next_tick_in_sec >= 0) {
+            HSync.state.systemStatus = s;
+            if (HSync.state.currentTab === 'home' && HSync.state.overview) HSync.renderHomeStatus();
+            // Healthy when a tick is scheduled and not over 10 minutes
+            // late. A tick due a few seconds ago is normal — WP-Cron fires
+            // on the next request — and used to read as "nothing
+            // scheduled". The DISABLE_WP_CRON case is informational, not
+            // a problem by itself — but combined with overdue it's the
+            // smoking gun. The simple view shows its own, plain-words
+            // version of this on the Panoramica.
+            if (HSync.cronHealthy(s) || !HSync.isAdvanced()) {
                 region.innerHTML = '';
                 return;
             }
@@ -436,6 +447,10 @@
     };
 
     HSync.switchTab = function (name) {
+        // The simple view only has its three tabs: anything else (a stale
+        // link, a "goto" button, the advanced switch just turned off)
+        // lands on the Panoramica instead of on a hidden panel.
+        if (!HSync.isAdvanced() && HSync.SIMPLE_TABS.indexOf(name) < 0) name = 'home';
         HSync.state.currentTab = name;
         $$('.hsync-tab').forEach(b => {
             const on = b.dataset.tab === name;
@@ -445,6 +460,8 @@
         $$('.hsync-panel').forEach(p => {
             p.classList.toggle('is-active', p.dataset.panel === name);
         });
+        if (name === 'home')      HSync.loadOverview();
+        if (name === 'import')    HSync.openImport();
         if (name === 'mappings')  HSync.loadMappings();
         if (name === 'runs')      HSync.loadRuns();
         if (name === 'pipelines') HSync.loadPipelines();
@@ -1308,9 +1325,16 @@
             +   '<input type="checkbox" data-field="job-bucket" value="' + id + '"' + (buckets.indexOf(id) >= 0 ? ' checked' : '') + '>'
             +   '<span>' + esc(label) + ' <small class="hsync-muted">' + esc(hint) + '</small></span>'
             + '</label>';
+        // Preserved on save but not editable here: say it is there, or a
+        // job that syncs one slice of the catalog looks like a full sync.
+        const catScope = HSync.describeCategoryFilter(opts.category_filter);
         return ''
             + '<fieldset class="hsync-job-options" style="border:1px solid #ccd0d4;border-radius:4px;padding:12px 14px;margin:12px 0;">'
             +   '<legend style="padding:0 6px;font-weight:600;font-size:13px;">Opzioni di run</legend>'
+            +   (catScope
+                    ? '<div class="hsync-feed-note" style="margin:0 0 10px;">Solo le categorie: <strong>' + esc(catScope) + '</strong>'
+                      + ' <small class="hsync-muted">(<code>options.category_filter</code> — si modifica dal JSON del job, tab Config)</small></div>'
+                    : '')
             +   '<label>Limite massimo prodotti per esecuzione'
             +     '<input type="number" min="0" step="1" data-field="job-limit" value="' + esc(String(limit)) + '" placeholder="0 = nessun limite" style="max-width:14em;">'
             +     '<small class="hsync-muted">Cappa il numero di FeedItem processati in un singolo tick. Utile per primi import controllati o per non saturare il server. <code>0</code> o vuoto = nessun limite.</small>'
@@ -1343,6 +1367,20 @@
             +     '<small class="hsync-muted" style="display:block;margin-top:4px;">Default: tutti e tre. Disattivane qualcuno per esecuzioni mirate (es. solo <code>updateStock</code> per refresh super-veloci).</small>'
             +   '</div>'
             + '</fieldset>';
+    };
+
+    /**
+     * JS twin of CategoryFilter::describe(): "Calzature, Borse › Zaini".
+     * '' for no filter.
+     */
+    HSync.describeCategoryFilter = function (raw) {
+        const list = Array.isArray(raw) ? raw : (typeof raw === 'string' ? raw.split(',') : []);
+        return list.map(v => String(v == null ? '' : v).replace(/\s+/g, ' ').trim()).filter(Boolean).map(v => {
+            const i = v.indexOf('>');
+            if (i < 0) return '«' + v + '»';
+            const cat = v.slice(0, i).trim(), sub = v.slice(i + 1).trim();
+            return (sub === '' || sub === '*') ? cat : cat + ' › ' + sub;
+        }).join(', ');
     };
 
     HSync.saveJob = async function () {
@@ -3116,6 +3154,7 @@
         // Claim the output region — a Media-tab repair may have pointed
         // it elsewhere, and this run must render in the Importa tab.
         HSync.runOutputSel = '[data-region="run-output"]';
+        HSync.runListener  = null;
         const sourceId = $('[data-field="run-source"]').value;
         if (!sourceId) { alert('Scegli una sorgente.'); return; }
         const formEl = $('[data-context="run"]');
@@ -3220,11 +3259,31 @@
      */
     HSync.runOutputSel = '[data-region="run-output"]';
 
+    /**
+     * Optional observer of the tick loop: listener(phase, payload) with
+     * phase 'start' | 'tick' | 'end'. The simple Importa draws its own
+     * progress from it instead of forking the loop (retry, backoff and
+     * resume stay in one place). Same ownership rule as runOutputSel:
+     * whoever STARTS a run sets it — or clears it — so a later run can
+     * never report into the previous run's view.
+     */
+    HSync.runListener = null;
+
     HSync.runImportTicked = async function (sourceId, configSlug, config, options, dryRun, startCursor, maxTicksOpt) {
         const out = $(HSync.runOutputSel);
         if (! startCursor) {
             out.innerHTML = '<p class="hsync-loading">Tick 1: starting…</p>';
         }
+        // Captured now: the listener of the run being started, not of
+        // whatever run is started next.
+        const listener = typeof HSync.runListener === 'function' ? HSync.runListener : null;
+        const notify = (phase, payload) => {
+            if (!listener) return;
+            try { listener(phase, payload || {}); } catch (err) { /* a broken view must not break the run */ }
+        };
+        // "Interrompi" sets this; the loop reads it between two ticks.
+        HSync.state.runAbort = false;
+        notify('start', { resumed: !!startCursor });
 
         // Two-bucket accumulator across ticks:
         //   - diffSnapshot: the source-diff numbers (fetched, new,
@@ -3278,19 +3337,30 @@
                 } catch (e) {
                     lastErr = e;
                     if (! e.transient || attempt === maxRetries) throw e;
+                    // "Interrompi" while the loop is waiting to retry: stop
+                    // now, as a stop — not 14s later as a failure.
+                    if (HSync.state.runAbort) { e.aborted = true; throw e; }
                     const wait = backoffMs[attempt] || 8000;
                     out.insertAdjacentHTML('beforeend',
                         '<div class="hsync-warning">Tick ' + tick + ' instabile (' + esc(e.message) + '). Ritento tra ' + (wait / 1000) + 's…</div>');
                     await sleep(wait);
+                    if (HSync.state.runAbort) { e.aborted = true; throw e; }
                 }
             }
             throw lastErr;
         };
 
+        let lastData = null;
+        let lastComposed = null;
+        let aborted = false;
         try {
             while (tick < maxTicks) {
+                // Stop between ticks: the one in flight finishes (≤ ~25s)
+                // so the run ends on a clean cursor, never mid-product.
+                if (HSync.state.runAbort) { aborted = true; break; }
                 tick++;
                 const data = await fetchTick();
+                lastData = data;
 
                 accumulated.runId    = data.run_id || accumulated.runId;
                 accumulated.warnings = data.warnings || accumulated.warnings;
@@ -3348,6 +3418,7 @@
                 // Compose the summary the renderer reads: diff snapshot
                 // from tick 1, result totals across all ticks.
                 const composed = Object.assign({}, accumulated.diffSnapshot, accumulated.totals);
+                lastComposed = composed;
 
                 HSync.renderRunResult({
                     status:   data.status,
@@ -3358,6 +3429,14 @@
                     progress: data.progress,
                     tick:     tick,
                 });
+                notify('tick', {
+                    status:   data.status,
+                    run_id:   accumulated.runId,
+                    summary:  composed,
+                    progress: data.progress || null,
+                    warnings: accumulated.warnings,
+                    tick:     tick,
+                });
 
                 if (data.status === 'continue') {
                     cursor = data.cursor || null;
@@ -3366,7 +3445,20 @@
                 }
                 break;  // 'done' or 'failed'
             }
-            if (tick >= maxTicks && cursor) {
+            if (aborted) {
+                // Close the Storico row now: a browser run that just stops
+                // ticking reads "In corso" for a day, until the upkeep files
+                // it as abandoned.
+                if (accumulated.runId) {
+                    try { await HSync.ajax('run_cancel', { run_id: accumulated.runId }); } catch (err) { /* row is closed by the upkeep */ }
+                }
+                out.insertAdjacentHTML('beforeend', '<div class="hsync-warning">Run interrotto dall\'operatore.</div>');
+                notify('end', { status: 'cancelled', run_id: accumulated.runId, summary: lastComposed });
+                return;
+            }
+            // Only when the cap actually cut the run short: a run whose
+            // last allowed tick FINISHED still holds the previous cursor.
+            if (tick >= maxTicks && cursor && lastData && lastData.status === 'continue') {
                 // Mirror the catch-path: stash everything needed so the
                 // resume button below has state to act on. Without this
                 // hitting the cap leaves the operator stranded.
@@ -3379,8 +3471,29 @@
                     '<div class="hsync-warning">Tetto Max tick raggiunto (' + maxTicks + '). Cursor preservato. '
                     + '<button type="button" class="hsync-button" data-action="run-resume">Riprendi da qui</button>'
                     + '</div>');
+                notify('end', { status: 'paused', run_id: accumulated.runId, summary: lastComposed, resumable: true });
+                return;
             }
+            const finalStatus = lastData ? String(lastData.status || '') : '';
+            notify('end', {
+                status:   finalStatus === 'continue' ? 'error' : finalStatus,
+                run_id:   accumulated.runId,
+                summary:  lastComposed,
+                warnings: accumulated.warnings,
+                error:    lastData && lastData.error ? String(lastData.error)
+                          : (finalStatus === 'continue' ? 'il server non ha restituito il punto da cui riprendere' : ''),
+            });
         } catch (e) {
+            if (e.aborted) {
+                // Stopped while retrying a shaky tick: same ending as a
+                // stop between two healthy ticks.
+                if (accumulated.runId) {
+                    try { await HSync.ajax('run_cancel', { run_id: accumulated.runId }); } catch (err) { /* closed by the upkeep */ }
+                }
+                out.insertAdjacentHTML('beforeend', '<div class="hsync-warning">Run interrotto dall\'operatore.</div>');
+                notify('end', { status: 'cancelled', run_id: accumulated.runId, summary: lastComposed });
+                return;
+            }
             // Persist the in-flight cursor so the operator can resume
             // manually. Cursor was returned by the LAST successful tick
             // and is what we'd send next — so it points at the item we
@@ -3391,6 +3504,9 @@
                 cursor: resumeCursor,
                 tick,
                 accumulated,
+                // Without it a resumed run fell back to the 200-tick
+                // default, capping a run that was started uncapped.
+                maxTicks: requestedCap,
             };
             const resumeBtn = resumeCursor
                 ? '<button type="button" class="hsync-button" data-action="run-resume">Riprendi da qui</button>'
@@ -3399,6 +3515,10 @@
                 '<div class="hsync-error">Tick ' + tick + ' fallito: ' + esc(e.message)
                 + (resumeCursor ? ' · cursor preservato' : '')
                 + ' ' + resumeBtn + '</div>');
+            notify('end', {
+                status: 'error', run_id: accumulated.runId, summary: lastComposed,
+                error: e.message, resumable: !!resumeCursor,
+            });
         }
     };
 
@@ -3759,7 +3879,13 @@
             const runs = data.runs || [];
             const labels = data.job_labels || {};
             if (!runs.length) {
-                region.innerHTML = '<div class="hsync-empty">Nessun run registrato.</div>';
+                region.innerHTML = '<div class="hsync-empty">'
+                    + (HSync.isAdvanced() ? 'Nessun run registrato.' : 'Ancora nessuna sincronizzazione o importazione.')
+                    + '</div>';
+                return;
+            }
+            if (!HSync.isAdvanced()) {
+                region.innerHTML = HSync.renderRunsSimple(runs, labels);
                 return;
             }
             const rows = runs.map(r => {
@@ -3811,6 +3937,1057 @@
         }
     };
 
+    // ─── Simple view (default) ────────────────────────────────────
+    //
+    // What the shop owner sees: Panoramica (one card per automation),
+    // Importa prodotti (a supplier, optionally some of its categories,
+    // one button) and the Storico in plain words. It never asks for a
+    // source, a mapping or a pipeline: it works in AUTOMATIONS, whose job
+    // row already carries them, and the server resolves the rest (see
+    // includes/ajax-simple.php). The technical tabs are untouched and sit
+    // behind "Modalità avanzata".
+
+    HSync.SIMPLE_TABS  = ['home', 'import', 'runs'];
+    HSync.ADVANCED_KEY = 'hsync.advanced';
+
+    HSync.isAdvanced = function () {
+        const app = document.getElementById('hsync-app');
+        return !!(app && app.classList.contains('is-advanced'));
+    };
+
+    /** Per-browser preference: storage can be blocked, and then simple wins. */
+    HSync.readAdvancedPref = function () {
+        try { return window.localStorage.getItem(HSync.ADVANCED_KEY) === '1'; } catch (e) { return false; }
+    };
+
+    HSync.setAdvanced = function (on, byUser) {
+        const app = document.getElementById('hsync-app');
+        if (!app) return;
+        app.classList.toggle('is-advanced', !!on);
+        const sw = $('[data-action="toggle-advanced"]');
+        if (sw) sw.checked = !!on;
+        if (!byUser) return;
+        try { window.localStorage.setItem(HSync.ADVANCED_KEY, on ? '1' : '0'); } catch (e) { /* per-tab only */ }
+        if (HSync.SIMPLE_TABS.indexOf(HSync.state.currentTab) < 0) {
+            if (!on) HSync.switchTab('home');
+        } else if (HSync.state.currentTab === 'runs') {
+            HSync.loadRuns();   // the columns differ between the two views
+        } else if (HSync.state.currentTab === 'home') {
+            HSync.renderHome();
+        }
+        HSync.refreshSystemStatus();
+    };
+
+    /** 1240 → "1.240". */
+    HSync.num = function (n) {
+        return Number(n || 0).toLocaleString('it-IT');
+    };
+
+    /** A heartbeat is scheduled and not over 10 minutes late. */
+    HSync.cronHealthy = function (s) {
+        return !!s && s.next_tick_in_sec !== null && s.next_tick_in_sec !== undefined && !s.overdue;
+    };
+
+    /** Raw run errors → words a shop owner can act on. */
+    HSync.friendlyError = function (msg) {
+        const m = String(msg || '').trim();
+        const http = m.match(/^HTTP (\d{3}) risposta non-JSON/);
+        if (http) return 'il server ha risposto con un errore (' + http[1] + '): di solito è momentaneo';
+        if (/^Rete:/.test(m))      return 'la connessione si è interrotta';
+        if (/^PHP fatal:/.test(m)) return 'errore del server — i dettagli sono in «Dettagli tecnici»';
+        if (/^Tick fallito:/.test(m)) return 'errore durante l\'importazione: ' + HSync.friendlyError(m.replace(/^Tick fallito:\s*/, ''));
+        if (/^source_config_not_found:/.test(m)) return 'manca il collegamento al fornitore';
+        if (/^source_not_registered:/.test(m))   return 'tipo di fornitore non disponibile';
+        if (/^rule_not_found:/.test(m))          return 'la regola non esiste più';
+        if (m === 'bootstrap_not_initialized')    return 'il plugin non si è avviato correttamente';
+        if (/timed? ?out|cURL error 28/i.test(m)) return 'il fornitore non ha risposto in tempo';
+        if (/\b40[13]\b|unauthori[sz]ed|forbidden/i.test(m)) return 'il fornitore ha rifiutato le credenziali';
+        return m.length > 180 ? m.slice(0, 177) + '…' : m;
+    };
+
+    /** A run summary in words: "12 nuovi · 340 aggiornati · 2 errori". */
+    HSync.countsPhrase = function (s, fallbackDone) {
+        s = s || {};
+        const n = HSync.num;
+        const parts = [];
+        const created = s.created || 0;
+        const updated = (s.updated || 0) + (s.recreated || 0) + (s.stock_patched || 0);
+        const blocked = (s.pre_blocked || 0) + (s.post_blocked || 0);
+        if (created)     parts.push(n(created) + (created === 1 ? ' nuovo' : ' nuovi'));
+        if (updated)     parts.push(n(updated) + (updated === 1 ? ' aggiornato' : ' aggiornati'));
+        if (s.retired)   parts.push(n(s.retired) + (s.retired === 1 ? ' nascosto' : ' nascosti') + ' (non più in vendita dal fornitore)');
+        if (s.restored)  parts.push(n(s.restored) + (s.restored === 1 ? ' tornato disponibile' : ' tornati disponibili'));
+        if (blocked)     parts.push(n(blocked) + ' non importabili (dati incompleti)');
+        if (s.failed)    parts.push(n(s.failed) + (s.failed === 1 ? ' errore' : ' errori'));
+        if (parts.length) return parts.join(' · ');
+        if (fallbackDone) return n(fallbackDone) + ' prodotti aggiornati';
+        return 'nessuna modifica necessaria';
+    };
+
+    const simpleLine = (cls, icon, html) =>
+        '<div class="hsync-feed-line ' + (cls || '') + '"><span class="dashicons dashicons-' + icon + '" aria-hidden="true"></span><span>' + html + '</span></div>';
+
+    // ── Panoramica ────────────────────────────────────────────────
+
+    HSync.loadOverview = async function () {
+        try {
+            HSync.state.overview = await HSync.ajax('overview', {});
+            HSync.state.overviewError = '';
+        } catch (e) {
+            HSync.state.overviewError = e.message;
+        }
+        if (HSync.state.currentTab === 'home') HSync.renderHome();
+        HSync.scheduleHomePoll();
+        return HSync.state.overview;
+    };
+
+    /**
+     * Keep the cards live while the Panoramica is open: every 8s while
+     * something runs, every 30s otherwise (the "tra N min" countdowns).
+     */
+    HSync.scheduleHomePoll = function () {
+        clearTimeout(HSync.state.homePollTimer);
+        if (HSync.state.currentTab !== 'home') return;
+        const o = HSync.state.overview || {};
+        const busy = (o.cards || []).some(c => c.run || c.run_control) || !!(o.runner && o.runner.busy);
+        HSync.state.homePollTimer = setTimeout(function () {
+            if (HSync.state.currentTab !== 'home') return;
+            // Never redraw under the owner's hands: an open select would
+            // close mid-choice.
+            const a = document.activeElement;
+            if (a && a.tagName === 'SELECT' && a.closest('[data-region="home-cards"]')) return HSync.scheduleHomePoll();
+            HSync.loadOverview();
+        }, busy ? 8000 : 30000);
+    };
+
+    HSync.renderHome = function () {
+        HSync.renderHomeStatus();
+        const region = $('[data-region="home-cards"]');
+        if (!region) return;
+        const o = HSync.state.overview;
+        if (!o) {
+            region.innerHTML = HSync.state.overviewError
+                ? '<div class="hsync-error">' + esc(HSync.state.overviewError) + '</div>'
+                : '<p class="hsync-loading">Caricamento…</p>';
+            return;
+        }
+        const cards = o.cards || [];
+        if (!cards.length) {
+            region.innerHTML = ''
+                + '<div class="hsync-empty-state">'
+                +   '<span class="dashicons dashicons-admin-plugins" aria-hidden="true"></span>'
+                +   '<h3>Nessun fornitore collegato</h3>'
+                +   '<p>Per iniziare va collegato il feed di un fornitore (indirizzo e credenziali). Si fa una volta sola: se non l\'hai fatto tu, chiedilo a chi ha configurato il sito.</p>'
+                +   '<p class="hsync-muted">Per chi lo configura: <strong>Modalità avanzata</strong> → <strong>Connetti</strong>, poi la sincronizzazione si accende da qui.</p>'
+                + '</div>';
+            return;
+        }
+        region.innerHTML = cards.map(HSync.renderFeedCard).join('');
+    };
+
+    /** The line on top of the Panoramica: is everything fine, and if not, what. */
+    HSync.renderHomeStatus = function () {
+        const region = $('[data-region="home-status"]');
+        if (!region) return;
+        const o = HSync.state.overview;
+        if (!o) { region.innerHTML = ''; return; }
+        const cards    = o.cards || [];
+        const enabled  = cards.filter(c => c.enabled);
+        const problems = [];
+        const sys      = HSync.state.systemStatus;
+        if (enabled.length && sys && !HSync.cronHealthy(sys)) {
+            problems.push('Le sincronizzazioni automatiche non stanno partendo: il sito non esegue le attività programmate. Avvisa chi gestisce il sito o l\'hosting.'
+                + '<details class="hsync-tech"><summary>Dettagli per il tecnico</summary>'
+                +   (sys.next_tick_at ? 'Il heartbeat <code>hive_sync_jobs_tick</code> è in ritardo di oltre 10 minuti.' : 'Nessun heartbeat <code>hive_sync_jobs_tick</code> pianificato.')
+                +   (sys.disable_wp_cron ? ' <code>DISABLE_WP_CRON</code> è attivo: serve' : ' Consigliato:')
+                +   ' un cron di sistema che chiami ogni minuto<br><code>' + esc(sys.recommended_crontab || '') + '</code>'
+                + '</details>');
+        }
+        cards.forEach(c => {
+            if (c.problem) {
+                problems.push('«' + esc(c.label) + '» non è più collegata al fornitore e non può partire: spegnila, o fai ricollegare il feed (Modalità avanzata → Connetti).');
+            } else if (!c.run && c.last && c.last.status === 'failed') {
+                problems.push('L\'ultima esecuzione di «' + esc(c.label) + '» non è riuscita'
+                    + (c.last.error ? ': ' + esc(HSync.friendlyError(c.last.error)) + '.' : '.'));
+            }
+        });
+
+        const facts = [];
+        const ck = HSync.state.cockpit;
+        if (ck && typeof ck.product_count === 'number') facts.push(HSync.num(ck.product_count) + ' prodotti nel negozio');
+        facts.push(enabled.length
+            ? (enabled.length === 1 ? '1 sincronizzazione automatica attiva' : enabled.length + ' sincronizzazioni automatiche attive')
+            : 'nessuna sincronizzazione automatica attiva');
+        const running = cards.filter(c => c.run).length;
+        if (running) facts.push(running === 1 ? '1 in corso adesso' : running + ' in corso adesso');
+
+        const ok = !problems.length;
+        region.innerHTML = ''
+            + '<div class="hsync-health ' + (ok ? 'is-ok' : 'is-warn') + '" role="status">'
+            +   '<span class="hsync-health-icon dashicons dashicons-' + (ok ? 'yes-alt' : 'warning') + '" aria-hidden="true"></span>'
+            +   '<div class="hsync-health-body">'
+            +     '<strong>' + (ok ? 'Tutto in ordine' : (problems.length === 1 ? 'C\'è una cosa da controllare' : 'Ci sono ' + problems.length + ' cose da controllare')) + '</strong>'
+            +     (ok ? '' : '<ul>' + problems.map(p => '<li>' + p + '</li>').join('') + '</ul>')
+            +     '<div class="hsync-health-facts">' + esc(facts.join(' · ')) + '</div>'
+            +   '</div>'
+            + '</div>';
+    };
+
+    HSync.renderFeedCard = function (c) {
+        const o       = HSync.state.overview || {};
+        const run     = c.run || null;
+        const control = c.run_control || '';
+        const paused  = !!run && !c.enabled && run.trigger !== 'manual';
+
+        let pill;
+        if (c.problem)               pill = ['is-bad',  'Da sistemare'];
+        else if (control === 'stop') pill = ['is-busy', 'Si sta fermando'];
+        else if (paused)             pill = ['is-warn', 'Ferma a metà'];
+        else if (run)                pill = ['is-busy', 'In corso'];
+        else if (control === 'run')  pill = ['is-busy', 'In partenza'];
+        else if (c.enabled)          pill = ['is-good', 'Attiva'];
+        else                         pill = ['is-dim',  'Spenta'];
+
+        const sub = c.kind === 'import'
+            ? (c.config_name && c.config_name !== c.label ? 'Fornitore: ' + c.config_name : 'Catalogo, prezzi e disponibilità dal fornitore')
+            : (c.kind === 'prices' ? 'Prezzi aggiornati da KicksDB' : (c.kind === 'rule' ? 'Regola automatica sui prodotti del negozio' : ''));
+
+        // ── State lines ───────────────────────────────────────────
+        const lines = [];
+        if (c.problem) {
+            lines.push(simpleLine('is-bad', 'warning', c.problem === 'rule_missing'
+                ? 'La regola che questa automazione esegue non esiste più.'
+                : 'Il collegamento al fornitore non esiste più: questa automazione non può partire.'));
+        }
+        if (control === 'stop') {
+            lines.push(simpleLine('is-busy', 'controls-pause', 'Si ferma alla fine del blocco in corso (al massimo mezzo minuto).'));
+        } else if (run) {
+            const p   = run.progress || null;
+            const pct = p && p.total > 0 ? Math.min(100, Math.round(p.done * 100 / p.total)) : null;
+            const what = pct !== null
+                ? HSync.num(p.done) + ' di ' + HSync.num(p.total) + ' prodotti (' + pct + '%)'
+                : 'sto leggendo il catalogo del fornitore…';
+            lines.push(simpleLine(paused ? 'is-warn' : 'is-busy', paused ? 'controls-pause' : 'update',
+                (paused ? 'Ferma a metà — riparte da qui quando la riaccendi o premi Riprendi: ' : 'In corso: ')
+                + esc(what) + ' · avviata ' + esc(HSync.fmtWhen(run.started_at)))
+                + (pct !== null ? '<div class="hsync-progress"><span style="width:' + pct + '%"></span></div>' : ''));
+        } else if (control === 'run') {
+            lines.push(simpleLine('is-busy', 'clock', 'In partenza: inizia entro un minuto.'));
+        }
+        if (!c.problem) {
+            if (c.enabled && c.cron_expr && c.next_run_at) {
+                lines.push(simpleLine('', 'calendar-alt', 'Prossima: <strong>' + esc(HSync.fmtWhen(c.next_run_at)) + '</strong>'
+                    + ' <span class="hsync-muted-inline">(' + esc(HSync.fmtRelative(c.next_run_at)) + ')</span>'));
+            } else if (!c.enabled && !run) {
+                lines.push(simpleLine('is-dim', 'controls-pause', c.kind === 'import'
+                    ? 'Spenta: prezzi e disponibilità non si aggiornano da soli.'
+                    : 'Spenta: non parte da sola.'));
+            }
+        }
+        if (c.last && !run) lines.push(HSync.lastRunLine(c));
+        else if (!c.last && !run && !c.problem) lines.push(simpleLine('is-dim', 'minus', 'Non è ancora mai partita.'));
+
+        // ── Settings ──────────────────────────────────────────────
+        const scheduleOpts = (o.schedules || []).map(s =>
+            '<option value="' + esc(s.key) + '"' + (s.key === c.schedule ? ' selected' : '') + '>' + esc(s.label) + '</option>').join('');
+        // A hand-written cron is shown as it is and left alone until the
+        // owner picks one of the presets.
+        const custom = c.schedule === 'custom'
+            ? '<option value="custom" selected disabled>' + esc(HSync.describeCron(c.cron_expr) || c.cron_expr) + ' (personalizzata)</option>'
+            : '';
+        const unset = c.schedule === '' ? '<option value="" selected disabled>— scegli —</option>' : '';
+        let settings = '<label class="hsync-feed-field">Ogni quanto'
+            + '<select data-action="feed-schedule" data-id="' + c.id + '"' + (c.problem ? ' disabled' : '') + '>' + unset + custom + scheduleOpts + '</select>'
+            + '</label>';
+        if (c.kind === 'import') {
+            if (c.add_new === null) {
+                settings += '<div class="hsync-feed-note">Cosa viene sincronizzato è stato personalizzato: si cambia in modalità avanzata.</div>';
+            } else {
+                settings += '<label class="hsync-feed-check">'
+                    + '<input type="checkbox" data-action="feed-addnew" data-id="' + c.id + '"' + (c.add_new ? ' checked' : '') + (c.problem ? ' disabled' : '') + '>'
+                    + ' Aggiungi da sola i nuovi prodotti del fornitore</label>'
+                    + '<div class="hsync-feed-note">' + (c.add_new
+                        ? 'Aggiunge al negozio i prodotti nuovi del fornitore e aggiorna prezzi e disponibilità degli altri.'
+                        : 'Aggiorna solo prezzi e disponibilità dei prodotti già nel negozio: i nuovi li aggiungi tu da «Importa prodotti», anche per categoria.')
+                    + (c.hides_missing ? ' I prodotti che il fornitore non vende più vengono nascosti dal negozio (e tornano se riappaiono).' : '')
+                    + '</div>';
+            }
+            if (c.categories_label) {
+                settings += '<div class="hsync-feed-note"><span class="dashicons dashicons-category" aria-hidden="true"></span> Solo le categorie: <strong>' + esc(c.categories_label) + '</strong></div>';
+            }
+        }
+
+        // ── Actions ───────────────────────────────────────────────
+        const actions = [];
+        if (!c.problem) {
+            if (paused) {
+                actions.push('<button type="button" class="button button-primary" data-action="feed-run" data-id="' + c.id + '">Riprendi</button>');
+            } else if (!run && control !== 'run') {
+                actions.push('<button type="button" class="button button-primary" data-action="feed-run" data-id="' + c.id + '">'
+                    + (c.kind === 'import' ? 'Sincronizza ora' : 'Esegui ora') + '</button>');
+            }
+            if (run || control === 'run') {
+                actions.push('<button type="button" class="button" data-action="feed-stop" data-id="' + c.id + '"' + (control === 'stop' ? ' disabled' : '') + '>Interrompi</button>');
+            }
+            if (c.importable) {
+                actions.push('<button type="button" class="button" data-action="feed-import" data-id="' + c.id + '">'
+                    + '<span class="dashicons dashicons-download" aria-hidden="true"></span> '
+                    + (c.has_categories ? 'Importa per categoria' : 'Importa prodotti') + '</button>');
+            }
+        }
+
+        const flashes = HSync.state.jobFlash || {};
+        const flash   = flashes[c.id] && flashes[c.id].until > Date.now() ? flashes[c.id] : null;
+
+        return ''
+            + '<article class="hsync-feed ' + pill[0] + '" data-job="' + c.id + '">'
+            +   '<header class="hsync-feed-head">'
+            +     '<div class="hsync-feed-title">'
+            +       '<h3>' + esc(c.label) + ' <span class="hsync-pill ' + pill[0] + '">' + esc(pill[1]) + '</span></h3>'
+            +       (sub ? '<div class="hsync-feed-sub">' + esc(sub) + '</div>' : '')
+            +     '</div>'
+            +     ((c.problem && !c.enabled) ? '' :
+                    '<label class="hsync-switch" title="' + (c.enabled ? 'Spegni' : 'Accendi') + ' la sincronizzazione automatica">'
+                  +   '<input type="checkbox" data-action="feed-toggle" data-id="' + c.id + '"' + (c.enabled ? ' checked' : '') + '>'
+                  +   '<span class="hsync-switch-track" aria-hidden="true"></span>'
+                  +   '<span class="hsync-switch-text">Automatica</span>'
+                  + '</label>')
+            +   '</header>'
+            +   '<div class="hsync-feed-body">' + lines.join('') + '</div>'
+            +   '<div class="hsync-feed-settings">' + settings + '</div>'
+            +   (actions.length ? '<footer class="hsync-feed-actions">' + actions.join('') + '</footer>' : '')
+            +   (flash ? '<div class="hsync-job-flash is-' + esc(flash.kind) + '">' + esc(flash.text) + '</div>' : '')
+            + '</article>';
+    };
+
+    /** "Ultima: oggi 12:03 · 3m 10s — 12 nuovi · 340 aggiornati". */
+    HSync.lastRunLine = function (c) {
+        const l    = c.last;
+        const when = HSync.fmtWhen(l.finished_at || l.started_at);
+        const dur  = HSync.runDuration(l);
+        const took = dur !== null ? ' · ' + HSync.fmtDuration(dur) : '';
+        const scope = l.categories ? ' (solo ' + l.categories + ')' : '';
+        const counts = HSync.countsPhrase(l.summary || {}, c.kind === 'import' ? 0 : l.items_done);
+        let cls = '', icon = 'yes-alt', text;
+        switch (l.status) {
+            case 'done':      cls = 'is-good'; text = 'Ultima: ' + when + took + scope + ' — ' + counts; break;
+            case 'partial':   cls = 'is-warn'; icon = 'marker'; text = 'Ultima: ' + when + scope + ' — fatta in parte: ' + counts; break;
+            case 'failed':    cls = 'is-bad';  icon = 'dismiss'; text = 'Ultima: ' + when + ' — non riuscita' + (l.error ? ': ' + HSync.friendlyError(l.error) : ''); break;
+            case 'cancelled': cls = 'is-dim';  icon = 'controls-pause'; text = 'Ultima: ' + when + scope + ' — interrotta' + (l.items_done ? ' dopo: ' + counts : ''); break;
+            case 'abandoned': cls = 'is-dim';  icon = 'minus'; text = 'Ultima: ' + when + ' — lasciata a metà'; break;
+            case 'skipped':   cls = 'is-dim';  icon = 'minus'; text = 'Ultima: ' + when + ' — saltata'; break;
+            default:          cls = 'is-dim';  icon = 'minus'; text = 'Ultima: ' + when + ' — ' + HSync.runStatus(l.status).label.toLowerCase();
+        }
+        let html = esc(text);
+        if (l.skipped_slots > 0) {
+            html += ' <span class="hsync-muted-inline">· ' + l.skipped_slots
+                + (l.skipped_slots === 1 ? ' orario saltato' : ' orari saltati') + ' perché è durata più dell\'intervallo</span>';
+        }
+        return simpleLine(cls, icon, html);
+    };
+
+    HSync.feedRunNow = async function (id) {
+        const btn = $('[data-action="feed-run"][data-id="' + id + '"]');
+        if (btn) { btn.disabled = true; btn.textContent = 'Avvio…'; }
+        try {
+            const data = await HSync.ajax('job_run_now', { id: String(id) });
+            HSync.setJobFlash(id, data.status === 'failed' ? 'err' : 'ok', HSync.describeRunNowSimple(data));
+        } catch (e) {
+            HSync.setJobFlash(id, 'err', e.message);
+        }
+        HSync.loadOverview();
+        HSync.refreshCockpit();
+    };
+
+    HSync.describeRunNowSimple = function (data) {
+        switch (data.status) {
+            case 'queued':   return 'In coda: parte entro un minuto.';
+            case 'continue': return 'Avviata: prosegue da sola, puoi anche chiudere la pagina.';
+            case 'done':     return 'Fatto.';
+            case 'partial':  return 'Fatta in parte: il resto alla prossima esecuzione.';
+            case 'skipped':  return 'Non è partita: ' + (data.reason || 'niente da fare') + '.';
+            case 'failed':   return 'Non riuscita: ' + HSync.friendlyError(data.error || '') + '.';
+            default:         return HSync.describeRunNow(data);
+        }
+    };
+
+    HSync.feedStop = async function (id) {
+        if (!confirm('Interrompere adesso?\n\nI prodotti già aggiornati restano come sono: la prossima esecuzione riparte dal catalogo aggiornato del fornitore.')) return;
+        try {
+            const data = await HSync.ajax('job_stop', { id: String(id) });
+            HSync.setJobFlash(id, 'ok', data.idle ? 'Partenza annullata.' : (data.stopped ? 'Interrotta.' : 'Si ferma alla fine del blocco in corso.'));
+        } catch (e) {
+            HSync.setJobFlash(id, 'err', e.message);
+        }
+        HSync.loadOverview();
+    };
+
+    /** One knob of an automation card: enabled / schedule / add_new. */
+    HSync.feedSetting = async function (id, field, value) {
+        const cards = (HSync.state.overview && HSync.state.overview.cards) || [];
+        const card  = cards.find(c => c.id === id);
+        const payload = { job_id: String(id) };
+        if (field === 'enabled') {
+            if (!value && card && card.kind === 'import' && !confirm(
+                'Spegnere la sincronizzazione automatica di «' + card.label + '»?\n\n'
+                + 'Prezzi e disponibilità smetteranno di aggiornarsi da soli finché non la riaccendi.')) {
+                return HSync.renderHome();   // puts the switch back
+            }
+            payload.enabled = value ? '1' : '0';
+            // Never scheduled: switching it on needs a cadence — the seeded one.
+            if (value && card && !card.cron_expr) payload.schedule = '2h';
+        } else if (field === 'schedule') {
+            payload.schedule = value;
+        } else if (field === 'add_new') {
+            payload.add_new = value ? '1' : '0';
+        }
+        try {
+            const res  = await HSync.ajax('feed_settings_save', payload);
+            const next = res.next_run_at && res.enabled ? ': prossima ' + HSync.fmtWhen(res.next_run_at) + '.' : '.';
+            let msg = 'Salvato.';
+            if (field === 'enabled')  msg = value ? 'Sincronizzazione automatica accesa' + next : 'Sincronizzazione automatica spenta.';
+            if (field === 'schedule') msg = 'Frequenza aggiornata' + next;
+            if (field === 'add_new')  msg = value ? 'Da ora i nuovi prodotti del fornitore vengono aggiunti da soli.' : 'Da ora si aggiornano solo i prodotti già nel negozio.';
+            if (res.running) msg += ' L\'esecuzione in corso finisce con le impostazioni di prima.';
+            HSync.setJobFlash(id, 'ok', msg);
+        } catch (e) {
+            HSync.setJobFlash(id, 'err', e.message);
+        }
+        await HSync.loadOverview();
+        HSync.refreshCockpit();
+    };
+
+    // ── Importa prodotti ──────────────────────────────────────────
+
+    HSync.state.qi = {
+        jobId: 0, pendingJob: 0, scope: 'cats',
+        tree: null, treeJob: 0, treeLoading: false, treeError: '',
+        selected: new Set(), expanded: new Set(), search: '',
+        // idle | running | done | error | cancelled | paused
+        phase: 'idle', stopping: false,
+        runId: 0, startedAt: 0, endedAt: 0,
+        progress: null, summary: null, base: null, warnings: [],
+        error: '', resumable: false, label: '', scopeLabel: '',
+    };
+
+    const QI_RESULT_KEYS = ['created', 'updated', 'recreated', 'stock_patched', 'skipped', 'failed', 'pre_blocked', 'post_blocked', 'retired', 'restored'];
+
+    HSync.importableFeeds = function () {
+        const o = HSync.state.overview;
+        return o ? (o.cards || []).filter(c => c.kind === 'import' && c.importable) : [];
+    };
+
+    HSync.qiFeed = function () {
+        const id = HSync.state.qi.jobId;
+        return HSync.importableFeeds().find(f => f.id === id) || null;
+    };
+
+    /** Case-, accent- and whitespace-insensitive key for the search box. */
+    HSync.qiNorm = function (s) {
+        return String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/\s+/g, ' ').trim();
+    };
+
+    /** Whole-run counters: a resumed segment restarts the loop's own. */
+    HSync.qiSum = function (a, b) {
+        const out = Object.assign({}, b || a || {});
+        QI_RESULT_KEYS.forEach(k => { out[k] = ((a && a[k]) || 0) + ((b && b[k]) || 0); });
+        return out;
+    };
+
+    /** Entry point of the tab — also from a card's "Importa" button. */
+    HSync.openImport = async function (jobId) {
+        const qi = HSync.state.qi;
+        if (jobId && qi.phase !== 'running') {
+            qi.pendingJob = jobId;
+            if (HSync.state.currentTab !== 'import') return HSync.switchTab('import');
+        } else if (jobId && HSync.state.currentTab !== 'import') {
+            return HSync.switchTab('import');
+        }
+        if (!HSync.state.overview) {
+            HSync.renderImport();
+            await HSync.loadOverview();
+        }
+        if (qi.phase === 'running') return HSync.renderImport();
+        const feeds = HSync.importableFeeds();
+        let want = qi.pendingJob || qi.jobId;
+        qi.pendingJob = 0;
+        if (!feeds.some(f => f.id === want)) {
+            // Prefer a supplier with categories: that is what this tab is for.
+            const pick = feeds.find(f => f.has_categories) || feeds[0];
+            want = pick ? pick.id : 0;
+        }
+        if (want !== qi.jobId || !qi.jobId) return HSync.qiSelectFeed(want);
+        HSync.renderImport();
+        // Back on the tab: "già nel negozio" may have moved since (a sync
+        // ran meanwhile). Re-counting reuses the cached feed snapshot.
+        const feed = HSync.qiFeed();
+        if (feed && feed.has_categories && qi.tree && !qi.treeLoading) HSync.qiLoadCategories(false);
+    };
+
+    HSync.qiSelectFeed = function (jobId) {
+        const qi = HSync.state.qi;
+        if (qi.phase === 'running') return;
+        qi.jobId = jobId || 0;
+        qi.selected = new Set();
+        qi.expanded = new Set();
+        qi.search = '';
+        if (qi.phase !== 'idle') HSync.qiResetState();
+        const feed = HSync.qiFeed();
+        qi.scope = feed && feed.has_categories ? 'cats' : 'all';
+        if (qi.treeJob !== qi.jobId) { qi.tree = null; qi.treeError = ''; }
+        HSync.renderImport();
+        if (feed && feed.has_categories && !qi.tree) HSync.qiLoadCategories(false);
+    };
+
+    HSync.qiSetScope = function (scope) {
+        const qi = HSync.state.qi;
+        qi.scope = scope === 'all' ? 'all' : 'cats';
+        const feed = HSync.qiFeed();
+        if (qi.scope === 'cats' && feed && feed.has_categories && !qi.tree && !qi.treeLoading) HSync.qiLoadCategories(false);
+        HSync.renderImportPicker();
+        HSync.renderImportAction();
+    };
+
+    HSync.qiLoadCategories = async function (refresh) {
+        const qi   = HSync.state.qi;
+        const feed = HSync.qiFeed();
+        if (!feed || !feed.has_categories) return;
+        const jobId = feed.id;
+        qi.treeLoading = true;
+        qi.treeError = '';
+        HSync.renderImportPicker();
+        try {
+            const tree = await HSync.ajax('feed_categories', { job_id: jobId, refresh: refresh ? '1' : '' });
+            if (qi.jobId !== jobId) return;   // the owner switched supplier meanwhile
+            if (!tree.supported) {
+                qi.tree = null;
+                qi.scope = 'all';
+            } else {
+                qi.tree = tree;
+                qi.treeJob = jobId;
+                // A refreshed listing may have lost a category the owner had
+                // ticked: drop it rather than send a filter that matches nothing.
+                const valid = new Set();
+                (tree.categories || []).forEach(c => { valid.add(c.value); (c.subs || []).forEach(s => valid.add(s.value)); });
+                qi.selected.forEach(v => { if (!valid.has(v)) qi.selected.delete(v); });
+            }
+        } catch (e) {
+            if (qi.jobId !== jobId) return;
+            qi.treeError = e.message;
+        }
+        qi.treeLoading = false;
+        HSync.renderImportPicker();
+        HSync.renderImportAction();
+    };
+
+    HSync.renderImport = function () {
+        const root = $('[data-region="qi"]');
+        if (!root) return;
+        if (!root.querySelector('[data-region="qi-form"]')) {
+            root.innerHTML = ''
+                + '<p class="hsync-lead">Aggiungi al negozio i prodotti di un fornitore — tutto il catalogo, o solo le categorie che vuoi. '
+                +   'I prodotti nuovi vengono aggiunti, quelli già nel negozio aggiornati.</p>'
+                + '<div class="hsync-qi" data-region="qi-form"></div>'
+                + '<div data-region="qi-progress"></div>'
+                // Hidden until an import has actually produced something to show.
+                + '<details class="hsync-tech hsync-qi-tech" data-region="qi-tech-box" hidden><summary>Dettagli tecnici dell\'ultima importazione</summary><div data-region="qi-tech"></div></details>';
+        }
+        HSync.renderImportForm();
+        HSync.renderImportProgress();
+    };
+
+    HSync.renderImportForm = function () {
+        const qi = HSync.state.qi;
+        const el = $('[data-region="qi-form"]');
+        if (!el) return;
+        if (!HSync.state.overview) {
+            el.innerHTML = HSync.state.overviewError
+                ? '<div class="hsync-error">' + esc(HSync.state.overviewError) + '</div>'
+                : '<p class="hsync-loading">Caricamento…</p>';
+            return;
+        }
+        const feeds = HSync.importableFeeds();
+        if (!feeds.length) {
+            el.innerHTML = '<div class="hsync-empty-state">'
+                + '<span class="dashicons dashicons-admin-plugins" aria-hidden="true"></span>'
+                + '<h3>Nessun fornitore da cui importare</h3>'
+                + '<p>Serve prima il collegamento al feed di un fornitore. Se non l\'hai fatto tu, chiedilo a chi ha configurato il sito.</p>'
+                + '</div>';
+            return;
+        }
+        const feed   = HSync.qiFeed();
+        const locked = qi.phase === 'running';
+        const feedPick = feeds.length === 1
+            ? '<strong class="hsync-qi-feedname">' + esc(feeds[0].label) + '</strong>'
+            : '<select data-action="qi-feed">' + feeds.map(f =>
+                '<option value="' + f.id + '"' + (f.id === qi.jobId ? ' selected' : '') + '>' + esc(f.label) + '</option>').join('') + '</select>';
+        const radio = (value, title, hint) =>
+            '<label class="hsync-qi-scope' + (qi.scope === value ? ' is-on' : '') + '">'
+            + '<input type="radio" name="hsync-qi-scope" value="' + value + '"' + (qi.scope === value ? ' checked' : '') + '>'
+            + '<span><strong>' + esc(title) + '</strong><small>' + esc(hint) + '</small></span></label>';
+        const scope = feed && feed.has_categories
+            ? '<div class="hsync-qi-scopes" role="radiogroup" aria-label="Cosa importare">'
+              + radio('cats', 'Solo alcune categorie', 'Scegli tu cosa portare nel negozio.')
+              + radio('all',  'Tutto il catalogo',     'Tutti i prodotti che il fornitore ha in listino.')
+              + '</div>'
+            : '<p class="hsync-qi-hint">Questo fornitore non divide il catalogo in categorie: viene importato tutto il catalogo.</p>';
+
+        el.innerHTML = ''
+            + '<fieldset class="hsync-qi-step"' + (locked ? ' disabled' : '') + '>'
+            +   '<legend><span class="hsync-qi-num">1</span> Fornitore</legend>'
+            +   feedPick
+            + '</fieldset>'
+            + '<fieldset class="hsync-qi-step"' + (locked ? ' disabled' : '') + '>'
+            +   '<legend><span class="hsync-qi-num">2</span> Cosa vuoi importare?</legend>'
+            +   scope
+            +   '<div data-region="qi-picker"></div>'
+            + '</fieldset>'
+            + '<div class="hsync-qi-step hsync-qi-go" data-region="qi-action"></div>';
+        HSync.renderImportPicker();
+        HSync.renderImportAction();
+    };
+
+    HSync.renderImportPicker = function () {
+        const qi = HSync.state.qi;
+        const el = $('[data-region="qi-picker"]');
+        if (!el) return;
+        const feed = HSync.qiFeed();
+        if (!feed || !feed.has_categories || qi.scope !== 'cats') { el.innerHTML = ''; return; }
+        if (!qi.tree) {
+            el.innerHTML = qi.treeError
+                ? '<div class="hsync-error">' + esc(qi.treeError) + ' <button type="button" class="button-link" data-action="qi-retry">Riprova</button></div>'
+                : '<div class="hsync-qi-wait"><span class="spinner is-active" aria-hidden="true"></span> Leggo le categorie dal fornitore… La prima volta può volerci un minuto.</div>';
+            return;
+        }
+        const t = qi.tree;
+        el.innerHTML = ''
+            + '<div class="hsync-cats">'
+            +   '<div class="hsync-cats-bar">'
+            +     '<input type="search" class="hsync-cats-search" data-action="qi-search" placeholder="Cerca una categoria…" aria-label="Cerca una categoria" value="' + esc(qi.search) + '">'
+            +     '<span class="hsync-cats-meta">'
+            +       HSync.num((t.categories || []).length) + ' categorie · ' + HSync.num(t.total) + ' prodotti in listino'
+            +       (t.fetched_at ? ' · elenco del ' + esc(HSync.fmtWhen(t.fetched_at)) : '')
+            +       ' · <button type="button" class="button-link" data-action="qi-refresh"' + (qi.treeLoading ? ' disabled' : '') + '>'
+            +         (qi.treeLoading ? 'Aggiorno…' : 'Aggiorna elenco') + '</button>'
+            +     '</span>'
+            +   '</div>'
+            +   (qi.treeError ? '<div class="hsync-error">' + esc(qi.treeError) + '</div>' : '')
+            +   '<ul class="hsync-cats-list" data-region="qi-cats-list"></ul>'
+            +   (t.uncategorized
+                    ? '<div class="hsync-cats-foot">' + (t.uncategorized === 1
+                        ? '1 prodotto del listino non ha una categoria: entra solo con «Tutto il catalogo».'
+                        : HSync.num(t.uncategorized) + ' prodotti del listino non hanno una categoria: entrano solo con «Tutto il catalogo».')
+                      + '</div>'
+                    : '')
+            + '</div>';
+        HSync.renderImportList();
+    };
+
+    HSync.qiCount = function (node) {
+        const all = node.in_shop >= node.count && node.count > 0;
+        return '<span class="hsync-cat-count">' + HSync.num(node.count)
+            + (node.in_shop ? ' <small>· ' + (all ? 'già tutti nel negozio' : HSync.num(node.in_shop) + ' già nel negozio') + '</small>' : '')
+            + '</span>';
+    };
+
+    HSync.renderImportList = function () {
+        const qi = HSync.state.qi;
+        const el = $('[data-region="qi-cats-list"]');
+        if (!el || !qi.tree) return;
+        const q = HSync.qiNorm(qi.search);
+        const rows = (qi.tree.categories || []).map(cat => {
+            const subs     = cat.subs || [];
+            const catHit   = !q || HSync.qiNorm(cat.name).indexOf(q) >= 0;
+            const subHits  = q && !catHit ? subs.filter(s => HSync.qiNorm(s.name).indexOf(q) >= 0) : subs;
+            if (q && !catHit && !subHits.length) return '';
+            const whole    = qi.selected.has(cat.value);
+            const picked   = subs.filter(s => qi.selected.has(s.value)).length;
+            const open     = qi.expanded.has(cat.value) || (q && !catHit);
+            const subRows  = open ? subHits.map(s =>
+                '<li class="hsync-sub">'
+                + '<label><input type="checkbox" data-action="qi-sub" data-cat="' + esc(cat.value) + '" data-value="' + esc(s.value) + '"'
+                +   ((whole || qi.selected.has(s.value)) ? ' checked' : '') + '> ' + esc(s.name) + '</label>'
+                + HSync.qiCount(s)
+                + '</li>').join('') : '';
+            return '<li class="hsync-cat' + (whole || picked ? ' is-picked' : '') + '">'
+                + '<div class="hsync-cat-row">'
+                +   (subs.length
+                        ? '<button type="button" class="hsync-cat-caret" data-action="qi-expand" data-value="' + esc(cat.value) + '"'
+                          + ' aria-expanded="' + (open ? 'true' : 'false') + '" title="' + (open ? 'Nascondi' : 'Mostra') + ' le sottocategorie">'
+                          + '<span class="dashicons dashicons-arrow-' + (open ? 'down' : 'right') + '-alt2" aria-hidden="true"></span></button>'
+                        : '<span class="hsync-cat-caret is-empty" aria-hidden="true"></span>')
+                +   '<label class="hsync-cat-label"><input type="checkbox" data-action="qi-cat" data-value="' + esc(cat.value) + '"'
+                +     (whole ? ' checked' : '') + (picked && !whole ? ' data-partial="1"' : '') + '> ' + esc(cat.name) + '</label>'
+                +   (picked && !whole ? '<span class="hsync-cat-partial">' + picked + ' di ' + subs.length + ' sottocategorie</span>' : '')
+                +   HSync.qiCount(cat)
+                + '</div>'
+                + (subRows ? '<ul class="hsync-subs">' + subRows + '</ul>' : '')
+                + '</li>';
+        }).join('');
+        el.innerHTML = rows || '<li class="hsync-cats-empty">Nessuna categoria contiene «' + esc(qi.search) + '».</li>';
+        // A checkbox can only be half-checked from script.
+        $$('input[data-partial="1"]', el).forEach(cb => { cb.indeterminate = true; });
+    };
+
+    HSync.qiCatByValue = function (value) {
+        const t = HSync.state.qi.tree;
+        return t ? (t.categories || []).find(c => c.value === value) || null : null;
+    };
+
+    HSync.qiToggleCat = function (value, on) {
+        const qi  = HSync.state.qi;
+        const cat = HSync.qiCatByValue(value);
+        if (!cat) return;
+        // The whole category replaces any of its subcategories.
+        (cat.subs || []).forEach(s => qi.selected.delete(s.value));
+        if (on) qi.selected.add(cat.value); else qi.selected.delete(cat.value);
+        HSync.renderImportList();
+        HSync.renderImportAction();
+    };
+
+    HSync.qiToggleSub = function (catValue, value, on) {
+        const qi  = HSync.state.qi;
+        const cat = HSync.qiCatByValue(catValue);
+        if (!cat) return;
+        const subs = cat.subs || [];
+        if (qi.selected.has(cat.value)) {
+            // The whole category was ticked: unticking one subcategory
+            // keeps all the others.
+            qi.selected.delete(cat.value);
+            subs.forEach(s => { if (s.value !== value) qi.selected.add(s.value); });
+        } else if (on) {
+            qi.selected.add(value);
+        } else {
+            qi.selected.delete(value);
+        }
+        // Every subcategory ticked and together they ARE the category
+        // (no product without a subcategory left out): one entry.
+        const covered = subs.reduce((n, s) => n + (s.count || 0), 0) === cat.count;
+        if (subs.length && covered && subs.every(s => qi.selected.has(s.value))) {
+            subs.forEach(s => qi.selected.delete(s.value));
+            qi.selected.add(cat.value);
+        }
+        HSync.renderImportList();
+        HSync.renderImportAction();
+    };
+
+    HSync.qiToggleExpand = function (value) {
+        const qi = HSync.state.qi;
+        if (qi.expanded.has(value)) qi.expanded.delete(value); else qi.expanded.add(value);
+        HSync.renderImportList();
+    };
+
+    HSync.qiClearSelection = function () {
+        HSync.state.qi.selected.clear();
+        HSync.renderImportList();
+        HSync.renderImportAction();
+    };
+
+    HSync.qiSearch = function (value) {
+        HSync.state.qi.search = String(value || '');
+        clearTimeout(HSync.state.qiSearchTimer);
+        HSync.state.qiSearchTimer = setTimeout(HSync.renderImportList, 120);
+    };
+
+    /** Products in the ticked nodes, and how many of them the shop already has. */
+    HSync.qiSelectionStats = function () {
+        const qi = HSync.state.qi;
+        const st = { count: 0, inShop: 0, nodes: 0 };
+        if (!qi.tree) return st;
+        (qi.tree.categories || []).forEach(cat => {
+            if (qi.selected.has(cat.value)) {
+                st.count += cat.count; st.inShop += cat.in_shop; st.nodes++;
+                return;
+            }
+            (cat.subs || []).forEach(s => {
+                if (qi.selected.has(s.value)) { st.count += s.count; st.inShop += s.in_shop; st.nodes++; }
+            });
+        });
+        return st;
+    };
+
+    HSync.renderImportAction = function () {
+        const qi = HSync.state.qi;
+        const el = $('[data-region="qi-action"]');
+        if (!el) return;
+        const feed = HSync.qiFeed();
+        if (!feed || qi.phase === 'running') { el.innerHTML = ''; return; }
+        let label, disabled = false, note = '';
+        if (qi.scope === 'cats' && feed.has_categories) {
+            const st = HSync.qiSelectionStats();
+            if (!qi.tree) {
+                label = 'Importa'; disabled = true;
+            } else if (!st.nodes) {
+                label = 'Scegli almeno una categoria'; disabled = true;
+            } else {
+                const fresh = st.count - st.inShop;
+                label = 'Importa ' + HSync.num(st.count) + (st.count === 1 ? ' prodotto' : ' prodotti');
+                note = (fresh > 0 ? HSync.num(fresh) + (fresh === 1 ? ' nuovo da aggiungere' : ' nuovi da aggiungere') : 'nessun prodotto nuovo')
+                    + (st.inShop ? ' · ' + HSync.num(st.inShop) + ' già nel negozio, da aggiornare' : '')
+                    + ' · <button type="button" class="button-link" data-action="qi-clear">Togli la selezione</button>';
+            }
+        } else {
+            label = 'Importa tutto il catalogo';
+            if (qi.tree && qi.tree.total) note = HSync.num(qi.tree.total) + ' prodotti nel listino del fornitore';
+        }
+        el.innerHTML = ''
+            + '<span class="hsync-qi-num">3</span>'
+            + '<div class="hsync-qi-go-body">'
+            +   '<button type="button" class="button button-primary button-hero" data-action="qi-start"' + (disabled ? ' disabled' : '') + '>' + esc(label) + '</button>'
+            +   (note ? '<div class="hsync-qi-note">' + note + '</div>' : '')
+            + '</div>';
+    };
+
+    HSync.qiStart = async function () {
+        const qi   = HSync.state.qi;
+        const feed = HSync.qiFeed();
+        if (!feed || qi.phase === 'running') return;
+        const byCategory = qi.scope === 'cats' && feed.has_categories;
+        const cats = byCategory ? Array.from(qi.selected) : [];
+        if (byCategory && !cats.length) return;
+        if (!byCategory && !confirm('Importare tutto il catalogo di «' + feed.label + '»?\n\n'
+            + 'Su un listino grande può richiedere parecchio tempo. I prodotti già nel negozio vengono aggiornati, quelli nuovi aggiunti.')) return;
+
+        let params;
+        try {
+            params = await HSync.ajax('import_params', { job_id: feed.id, categories: cats });
+        } catch (e) {
+            Object.assign(qi, { phase: 'error', error: e.message, resumable: false, label: feed.label, scopeLabel: '' });
+            HSync.renderImportProgress();
+            return;
+        }
+        Object.assign(qi, {
+            phase: 'running', stopping: false, runId: 0,
+            startedAt: Date.now(), endedAt: 0,
+            progress: null, summary: null, base: null, warnings: [],
+            error: '', resumable: false,
+            label: feed.label, scopeLabel: params.categories_label || '',
+        });
+        const tech = $('[data-region="qi-tech"]');
+        if (tech) tech.innerHTML = '';
+        const techBox = $('[data-region="qi-tech-box"]');
+        if (techBox) techBox.hidden = false;
+        HSync.renderImportForm();
+        HSync.renderImportProgress();
+        HSync.runOutputSel = '[data-region="qi-tech"]';
+        HSync.runListener  = HSync.qiListener;
+        await HSync.qiDrive(() => HSync.runImportTicked(
+            params.source_id, params.config_slug,
+            {},              // the config comes from the saved slug, server-side
+            params.options,
+            false,           // a real import: the counts on screen were the preview
+            null,
+            0,               // uncapped: it runs until the selection is done
+        ));
+    };
+
+    /** Warn before the tab closes while the browser is driving an import. */
+    HSync.qiDrive = async function (fn) {
+        window.addEventListener('beforeunload', HSync.qiBeforeUnload);
+        clearInterval(HSync.state.qiClock);
+        HSync.state.qiClock = setInterval(HSync.qiTickClock, 1000);
+        try {
+            await fn();
+        } finally {
+            window.removeEventListener('beforeunload', HSync.qiBeforeUnload);
+            clearInterval(HSync.state.qiClock);
+        }
+    };
+
+    HSync.qiBeforeUnload = function (e) {
+        e.preventDefault();
+        e.returnValue = '';
+        return '';
+    };
+
+    HSync.qiTickClock = function () {
+        const qi = HSync.state.qi;
+        const el = document.querySelector('[data-qi-elapsed]');
+        if (el && qi.phase === 'running') el.textContent = HSync.fmtDuration((Date.now() - qi.startedAt) / 1000);
+    };
+
+    HSync.qiListener = function (phase, p) {
+        const qi = HSync.state.qi;
+        if (phase === 'start') {
+            if (p.resumed && qi.summary) qi.base = HSync.qiSum(qi.base, qi.summary);
+            qi.summary = null;
+            HSync.renderImportProgress();
+            return;
+        }
+        if (p.run_id)   qi.runId    = p.run_id;
+        if (p.summary)  qi.summary  = p.summary;
+        if (p.progress) qi.progress = p.progress;
+        if (p.warnings) qi.warnings = p.warnings;
+        if (phase === 'end') {
+            qi.phase = ({ done: 'done', cancelled: 'cancelled', paused: 'paused' })[p.status] || 'error';
+            if (qi.phase === 'error') {
+                qi.error = p.error || 'l\'importazione non è riuscita';
+                qi.resumable = !!p.resumable;
+            }
+            if (qi.phase === 'paused') qi.resumable = true;
+            qi.endedAt  = Date.now();
+            qi.stopping = false;
+            HSync.renderImportForm();
+            if (qi.phase === 'done' || qi.phase === 'cancelled') {
+                // "Già nel negozio" changed: re-count it (the feed snapshot
+                // is reused, only the shop side is re-read).
+                HSync.qiLoadCategories(false);
+                HSync.refreshCockpit();
+                HSync.loadOverview();
+            }
+        }
+        HSync.renderImportProgress();
+    };
+
+    HSync.qiStop = function () {
+        const qi = HSync.state.qi;
+        if (qi.phase !== 'running' || qi.stopping) return;
+        if (!confirm('Interrompere l\'importazione?\n\nI prodotti già importati restano nel negozio.')) return;
+        qi.stopping = true;
+        HSync.state.runAbort = true;
+        HSync.renderImportProgress();
+    };
+
+    HSync.qiResume = async function () {
+        const qi = HSync.state.qi;
+        if (!HSync.lastFailedRun || !HSync.lastFailedRun.cursor) {
+            qi.resumable = false;
+            HSync.renderImportProgress();
+            return;
+        }
+        Object.assign(qi, { phase: 'running', error: '', endedAt: 0, stopping: false });
+        HSync.renderImportForm();
+        HSync.renderImportProgress();
+        HSync.runOutputSel = '[data-region="qi-tech"]';
+        HSync.runListener  = HSync.qiListener;
+        await HSync.qiDrive(() => HSync.resumeFailedRun());
+    };
+
+    HSync.qiResetState = function () {
+        Object.assign(HSync.state.qi, {
+            phase: 'idle', stopping: false, error: '', resumable: false,
+            progress: null, summary: null, base: null, warnings: [],
+        });
+    };
+
+    HSync.qiReset = function () {
+        if (HSync.state.qi.phase === 'running') return;
+        HSync.qiResetState();
+        HSync.renderImportForm();
+        HSync.renderImportProgress();
+    };
+
+    HSync.qiNotes = function (warnings, open) {
+        const list = (warnings || []).filter(Boolean);
+        if (!list.length) return '';
+        return '<details class="hsync-qi-notes"' + (open ? ' open' : '') + '><summary>'
+            + list.length + (list.length === 1 ? ' nota' : ' note') + ' dal controllo del feed</summary>'
+            + '<ul>' + list.map(w => '<li>' + esc(w) + '</li>').join('') + '</ul></details>';
+    };
+
+    HSync.renderImportProgress = function () {
+        const qi = HSync.state.qi;
+        const el = $('[data-region="qi-progress"]');
+        if (!el) return;
+        if (qi.phase === 'idle') { el.innerHTML = ''; return; }
+        const s       = HSync.qiSum(qi.base, qi.summary);
+        const what    = esc(qi.label) + ' — ' + (qi.scopeLabel ? 'solo ' + esc(qi.scopeLabel) : 'tutto il catalogo');
+        const elapsed = HSync.fmtDuration(((qi.endedAt || Date.now()) - qi.startedAt) / 1000);
+        const box = (cls, icon, head, body, actions) =>
+            '<div class="hsync-qi-run ' + cls + '" role="status">'
+            + '<div class="hsync-qi-run-head">' + icon + '<strong>' + head + '</strong></div>'
+            + body
+            + (actions ? '<div class="hsync-actions">' + actions + '</div>' : '')
+            + '</div>';
+        const dash = name => '<span class="dashicons dashicons-' + name + '" aria-hidden="true"></span>';
+
+        if (qi.phase === 'running') {
+            const p   = qi.progress;
+            const pct = p && p.total > 0 ? Math.min(100, Math.round((p.done || 0) * 100 / p.total)) : null;
+            const head = qi.stopping
+                ? 'Mi fermo alla fine del blocco in corso…'
+                : (pct === null
+                    ? 'Scarico il catalogo dal fornitore e preparo l\'importazione…'
+                    : 'Importazione in corso: ' + HSync.num(p.done) + ' di ' + HSync.num(p.total) + ' (' + pct + '%)');
+            el.innerHTML = box('is-running', '<span class="spinner is-active" aria-hidden="true"></span>', esc(head),
+                '<div class="hsync-progress' + (pct === null ? ' is-indeterminate' : '') + '"><span style="width:' + (pct === null ? 100 : pct) + '%"></span></div>'
+                + '<div class="hsync-qi-run-meta">' + what + ' · <span data-qi-elapsed>' + esc(elapsed) + '</span>'
+                +   (qi.summary || qi.base ? ' · finora ' + esc(HSync.countsPhrase(s)) : '') + '</div>'
+                + '<p class="hsync-qi-run-hint">Lascia aperta questa scheda finché non ha finito: puoi lavorare in un\'altra.</p>',
+                '<button type="button" class="button" data-action="qi-stop"' + (qi.stopping ? ' disabled' : '') + '>Interrompi</button>');
+            return;
+        }
+        if (qi.phase === 'done') {
+            const touched = QI_RESULT_KEYS.some(k => k !== 'skipped' && (s[k] || 0) > 0);
+            const empty   = (s.fetched || 0) === 0;
+            const head = empty
+                ? 'Il fornitore non ha restituito prodotti per questa scelta.'
+                : (touched ? 'Importazione completata in ' + elapsed : 'Niente da fare: era già tutto aggiornato.');
+            el.innerHTML = box(empty ? 'is-warn' : 'is-done', dash(empty ? 'warning' : 'yes-alt'), esc(head),
+                (touched ? '<div class="hsync-qi-run-meta"><strong>' + esc(HSync.countsPhrase(s)) + '</strong></div>' : '')
+                + '<div class="hsync-qi-run-meta">' + what + '</div>'
+                + ((s.failed || 0) > 0 ? '<p class="hsync-qi-run-hint">Alcuni prodotti non sono stati importati: in «Dettagli tecnici» qui sotto trovi quali e perché.</p>' : '')
+                + HSync.qiNotes(qi.warnings, empty),
+                '<button type="button" class="button button-primary" data-action="qi-reset">Fatto</button>'
+                + '<button type="button" class="button" data-action="goto-tab" data-tab="runs">Vedi lo storico</button>');
+            return;
+        }
+        if (qi.phase === 'cancelled') {
+            el.innerHTML = box('is-dim', dash('controls-pause'), 'Importazione interrotta',
+                '<div class="hsync-qi-run-meta">' + what + '</div>'
+                + '<p class="hsync-qi-run-hint">I prodotti già elaborati restano nel negozio' + (qi.summary || qi.base ? ': ' + esc(HSync.countsPhrase(s)) : '') + '.</p>',
+                '<button type="button" class="button" data-action="qi-reset">Chiudi</button>');
+            return;
+        }
+        // error / paused
+        el.innerHTML = box('is-bad', dash('warning'), qi.phase === 'paused' ? 'Importazione in pausa' : 'L\'importazione si è fermata',
+            (qi.error ? '<div class="hsync-qi-run-meta">' + esc(HSync.friendlyError(qi.error)) + '</div>' : '')
+            + (qi.label ? '<div class="hsync-qi-run-meta">' + what + '</div>' : '')
+            + (qi.resumable ? '<p class="hsync-qi-run-hint">Riprendendo, continua da dove si era fermata: i prodotti già fatti non vengono rifatti.</p>' : ''),
+            (qi.resumable ? '<button type="button" class="button button-primary" data-action="qi-resume">Riprendi da dove si era fermata</button>' : '')
+            + '<button type="button" class="button" data-action="qi-reset">Chiudi</button>');
+    };
+
+    // ── Storico (simple columns) ──────────────────────────────────
+
+    HSync.renderRunsSimple = function (runs, labels) {
+        const cards = (HSync.state.overview && HSync.state.overview.cards) || [];
+        const byRef = {};
+        cards.forEach(c => { if (c.source_id && c.config_slug) byRef[c.source_id + '/' + c.config_slug] = c.label; });
+        const rows = runs.map(r => {
+            const st       = HSync.runStatus(r.status);
+            const report   = r.report || {};
+            const summary  = report.summary || {};
+            const sched    = report.schedule || null;
+            const inFlight = r.status === 'continue' || r.status === 'running';
+            const name     = (r.job_id && labels[r.job_id]) || byRef[r.runnable_ref] || r.runnable_ref;
+            const how      = r.job_id
+                ? (sched && sched.trigger === 'manual' ? 'avviata a mano' : 'automatica')
+                : 'importazione manuale';
+            let dur = inFlight ? (Date.now() - HSync.parseUtc(r.started_at)) / 1000 : HSync.runDuration(r);
+            if (dur !== null && isNaN(dur)) dur = null;
+            let result;
+            if (r.status === 'failed') {
+                result = '<span class="is-bad">' + esc(HSync.friendlyError(report.error || 'non riuscita')) + '</span>';
+            } else if (inFlight) {
+                result = esc(HSync.num(r.items_done || 0)) + (r.items_total ? ' di ' + esc(HSync.num(r.items_total)) : '') + ' finora';
+            } else {
+                result = esc(HSync.countsPhrase(summary, r.runnable_type === 'source.import' ? 0 : r.items_done));
+            }
+            return '<tr>'
+                + '<td>' + esc(HSync.fmtWhen(r.started_at, { date: true })) + (dur !== null ? '<div class="hsync-muted-inline">' + esc(HSync.fmtDuration(dur)) + (inFlight ? ' finora' : '') + '</div>' : '') + '</td>'
+                + '<td><strong>' + esc(name) + '</strong><div class="hsync-muted-inline">' + esc(how)
+                +   (summary.categories ? ' · solo ' + esc(summary.categories) : '') + '</div></td>'
+                + '<td><span class="hsync-action-pill ' + st.cls + '">' + esc(st.label) + '</span></td>'
+                + '<td>' + result + '</td>'
+                + '</tr>';
+        }).join('');
+        return '<table class="hsync-table hsync-runs-simple">'
+            + '<thead><tr><th>Quando</th><th>Cosa</th><th>Esito</th><th>Risultato</th></tr></thead>'
+            + '<tbody>' + rows + '</tbody></table>'
+            + '<p class="hsync-muted">Orari nel fuso del negozio (' + esc(HSync.tzLabel()) + ').</p>';
+    };
+
     // ─── Event delegation ─────────────────────────────────────────
 
     document.addEventListener('click', function (e) {
@@ -3820,6 +4997,23 @@
         const tabBtn = e.target.closest && e.target.closest('.hsync-tab');
         if (tabBtn) return HSync.switchTab(tabBtn.dataset.tab);
         const t = e.target;
+
+        // Simple view (Panoramica / Importa prodotti). closest(), because
+        // these buttons carry icons and a click on one targets the span.
+        const sa  = t.closest && t.closest('[data-action]');
+        const act = sa ? sa.dataset.action : '';
+        if (act === 'feed-run')    return HSync.feedRunNow(parseInt(sa.dataset.id, 10));
+        if (act === 'feed-stop')   return HSync.feedStop(parseInt(sa.dataset.id, 10));
+        if (act === 'feed-import') return HSync.openImport(parseInt(sa.dataset.id, 10));
+        if (act === 'goto-tab')    return HSync.switchTab(sa.dataset.tab);
+        if (act === 'qi-start')    return HSync.qiStart();
+        if (act === 'qi-stop')     return HSync.qiStop();
+        if (act === 'qi-resume')   return HSync.qiResume();
+        if (act === 'qi-reset')    return HSync.qiReset();
+        if (act === 'qi-retry')    return HSync.qiLoadCategories(false);
+        if (act === 'qi-refresh')  return HSync.qiLoadCategories(true);
+        if (act === 'qi-expand')   return HSync.qiToggleExpand(sa.dataset.value);
+        if (act === 'qi-clear')    return HSync.qiClearSelection();
         if (t.matches('[data-action="goto-run"]'))      return HSync.switchTab('run');
         if (t.matches('[data-action="cockpit-tick"]')) return HSync.cockpitTickNow();
         if (t.matches('[data-action="runs-purge-all"]'))    return HSync.purgeRunsAll();
@@ -4010,6 +5204,17 @@
     });
 
     document.addEventListener('change', function (e) {
+        // Simple view.
+        const el = e.target;
+        if (el.matches('[data-action="toggle-advanced"]')) return HSync.setAdvanced(el.checked, true);
+        if (el.matches('[data-action="feed-toggle"]'))     return HSync.feedSetting(parseInt(el.dataset.id, 10), 'enabled', el.checked);
+        if (el.matches('[data-action="feed-schedule"]'))   return HSync.feedSetting(parseInt(el.dataset.id, 10), 'schedule', el.value);
+        if (el.matches('[data-action="feed-addnew"]'))     return HSync.feedSetting(parseInt(el.dataset.id, 10), 'add_new', el.checked);
+        if (el.matches('[data-action="qi-feed"]'))         return HSync.qiSelectFeed(parseInt(el.value, 10));
+        if (el.matches('[name="hsync-qi-scope"]'))         return HSync.qiSetScope(el.value);
+        if (el.matches('[data-action="qi-cat"]'))          return HSync.qiToggleCat(el.dataset.value, el.checked);
+        if (el.matches('[data-action="qi-sub"]'))          return HSync.qiToggleSub(el.dataset.cat, el.dataset.value, el.checked);
+
         if (e.target.matches('[data-control="mappings-filter"]')) HSync.loadMappings();
         if (e.target.matches('[data-field="run-source"]'))        HSync.populateRunMappings();
         if (e.target.matches('[data-field="rule-sel-mode"]')) {
@@ -4052,6 +5257,7 @@
     });
 
     document.addEventListener('input', function (e) {
+        if (e.target.matches('[data-action="qi-search"]')) return HSync.qiSearch(e.target.value);
         // Live-sync spine value inputs into state.
         if (e.target.matches('[data-mapping-key]')) {
             HSync.state.mappingValues[e.target.dataset.mappingKey] = e.target.value;
@@ -4377,6 +5583,7 @@
         // render where that button lives. runNow() re-claims the
         // selector when the operator next starts a run from Importa.
         HSync.runOutputSel = '[data-region="media-missing-output"]';
+        HSync.runListener  = null;
         await HSync.runImportTicked(
             params.source_id,
             params.config_slug,
@@ -4907,6 +6114,8 @@
     // ─── Boot ─────────────────────────────────────────────────────
 
     document.addEventListener('DOMContentLoaded', function () {
+        HSync.setAdvanced(HSync.readAdvancedPref(), false);
+        HSync.switchTab('home');
         HSync.refreshCockpit();
         HSync.refreshSystemStatus();
         HSync.loadSources();

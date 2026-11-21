@@ -70,6 +70,7 @@ return array(
     'HiveSync\\Operations\\Taxonomy\\AutoCategorize' => $baseDir . '/src/Operations/Taxonomy/AutoCategorize.php',
     'HiveSync\\Operations\\Taxonomy\\ResolveTaxonomy' => $baseDir . '/src/Operations/Taxonomy/ResolveTaxonomy.php',
     'HiveSync\\Sources\\AttributeMerger' => $baseDir . '/src/Sources/AttributeMerger.php',
+    'HiveSync\\Sources\\CategoryFilter' => $baseDir . '/src/Sources/CategoryFilter.php',
     'HiveSync\\Sources\\CsvSource' => $baseDir . '/src/Sources/CsvSource.php',
     'HiveSync\\Sources\\JsonSource' => $baseDir . '/src/Sources/JsonSource.php',
     'HiveSync\\Sources\\KicksDbSource' => $baseDir . '/src/Sources/KicksDbSource.php',
@@ -107,4 +108,7 @@ return array(
     'HiveSync\\Workflow\\Schedule\\RunnerLease' => $baseDir . '/src/Workflow/Schedule/RunnerLease.php',
     'HiveSync\\Workflow\\Schedule\\SchedulerMigration' => $baseDir . '/src/Workflow/Schedule/SchedulerMigration.php',
     'HiveSync\\Workflow\\Seed\\Defaults' => $baseDir . '/src/Workflow/Seed/Defaults.php',
+    'HiveSync\\Workflow\\Simple\\FeedCategorySnapshot' => $baseDir . '/src/Workflow/Simple/FeedCategorySnapshot.php',
+    'HiveSync\\Workflow\\Simple\\FeedOverview' => $baseDir . '/src/Workflow/Simple/FeedOverview.php',
+    'HiveSync\\Workflow\\Simple\\SimpleSettings' => $baseDir . '/src/Workflow/Simple/SimpleSettings.php',
 );
