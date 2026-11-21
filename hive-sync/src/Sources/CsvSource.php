@@ -266,7 +266,11 @@ final class CsvSource extends AbstractSource
                 $sfMarkupTarget = 'sale';
             }
             $items = self::sfNormalizeAndTransform($assocRows, $flatMultiplier, $importStatus, $sfMarkupRules, $sfMarkupTarget);
-            $items = self::applySfCategoryFilter($items, $request->options['category_filter'] ?? null);
+            $catFilter   = CategoryFilter::parse($request->options['category_filter'] ?? null);
+            $beforeCount = count($items);
+            if ($catFilter !== []) {
+                $items = self::applySfCategoryFilter($items, $catFilter);
+            }
             if ($mapping) {
                 $remapped = [];
                 foreach ($items as $item) {
@@ -295,19 +299,35 @@ final class CsvSource extends AbstractSource
             // so the operator knows where parsing actually broke down
             // (no rows / no PRODUCT records / records but no SKU / etc.).
             $sfDiag = self::diagnoseSfRows($assocRows, $header);
-            $warnings = array_filter([ $diagnostic, $sfDiag ]);
+            // A category filter that keeps nothing is almost always a
+            // category the supplier renamed. Say so: "0 products" alone
+            // reads like a broken feed, and a scheduled job would go on
+            // importing nothing, green run after green run.
+            $filterDiag = ($catFilter !== [] && $beforeCount > 0 && count($items) === 0)
+                ? sprintf(
+                    'Nessuno dei %d prodotti del feed appartiene alle categorie selezionate (%s). Il fornitore potrebbe averle rinominate: riapri la scelta delle categorie.',
+                    $beforeCount,
+                    CategoryFilter::describe($request->options['category_filter'] ?? null)
+                )
+                : '';
+            $warnings = array_filter([ $diagnostic, $sfDiag, $filterDiag ]);
             if (count($items) === 0 && ! $warnings) {
                 $warnings[] = 'Nessun prodotto SF dopo aggregazione. Verifica colonne RECORD_TYPE / SKU / MODEL_SIZE.';
             }
+            $stats = [
+                'body_bytes' => $bodyLen,
+                'flat_rows'  => count($assocRows),
+                'products'   => count($items),
+                'flavor'     => 'stockfirmati',
+                'header_columns' => $header !== null ? count($header) : 0,
+            ];
+            if ($catFilter !== []) {
+                $stats['category_filter_kept'] = count($items);
+                $stats['category_filter_of']   = $beforeCount;
+            }
             return new FetchResult(
                 items: $items,
-                stats: [
-                    'body_bytes' => $bodyLen,
-                    'flat_rows'  => count($assocRows),
-                    'products'   => count($items),
-                    'flavor'     => 'stockfirmati',
-                    'header_columns' => $header !== null ? count($header) : 0,
-                ],
+                stats: $stats,
                 warnings: array_values($warnings),
             );
         }
@@ -1174,31 +1194,55 @@ final class CsvSource extends AbstractSource
     }
 
     /**
-     * SF subset filter: keep items whose `_sf_category` (post-normalize)
-     * matches the operator's filter. Used by the multi-job-per-subset
-     * pattern (e.g. one job per category subset, each with its own
-     * markup pipeline override).
+     * SF subset filter: keep the items whose CAT / SUBCAT pass the
+     * operator's `category_filter` — the Importa tab's "solo alcune
+     * categorie", or a job that syncs a slice of the catalog. Matching
+     * rules (exact paths vs the legacy substring form) live in
+     * CategoryFilter.
      *
-     * @param FeedItem[] $items
-     * @param mixed      $rawFilter
+     * @param FeedItem[]                 $items
+     * @param list<array<string, mixed>> $filter  CategoryFilter::parse() output
      * @return FeedItem[]
      */
-    private static function applySfCategoryFilter(array $items, $rawFilter): array
+    private static function applySfCategoryFilter(array $items, array $filter): array
     {
-        $filter = self::normalizeCategoryFilter($rawFilter);
         if ($filter === []) return $items;
         $out = [];
         foreach ($items as $item) {
-            $cat = strtolower(trim((string) ($item->data['_sf_category'] ?? '')));
-            $sub = strtolower(trim((string) ($item->data['_sf_subcategory'] ?? '')));
-            $matched = false;
-            foreach ($filter as $f) {
-                if ($cat !== '' && ($cat === $f || str_contains($cat, $f))) { $matched = true; break; }
-                if ($sub !== '' && ($sub === $f || str_contains($sub, $f))) { $matched = true; break; }
-            }
-            if ($matched) $out[] = $item;
+            $path = self::sfCategoryPath($item);
+            if ($path !== null && CategoryFilter::matches($path[0], $path[1], $filter)) $out[] = $item;
         }
         return $out;
+    }
+
+    /**
+     * Only the StockFirmati flavor carries a category tree (CAT →
+     * SUBCAT); a generic CSV maps whatever it has into `categories`,
+     * which is a flat list, not a tree.
+     */
+    public function hasCategories(array $config): bool
+    {
+        return (string) ($config['flavor'] ?? self::FLAVOR_GENERIC) === self::FLAVOR_SF;
+    }
+
+    public function categoryPath(FeedItem $item): ?array
+    {
+        return self::sfCategoryPath($item);
+    }
+
+    /**
+     * [CAT, SUBCAT] of an SF item as the transform stored them; null for
+     * anything that isn't an SF item.
+     *
+     * @return array{0: string, 1: string}|null
+     */
+    private static function sfCategoryPath(FeedItem $item): ?array
+    {
+        if (($item->data['_hsync_flavor'] ?? '') !== self::FLAVOR_SF) return null;
+        return [
+            (string) ($item->data['_sf_category']    ?? ''),
+            (string) ($item->data['_sf_subcategory'] ?? ''),
+        ];
     }
 
     /**

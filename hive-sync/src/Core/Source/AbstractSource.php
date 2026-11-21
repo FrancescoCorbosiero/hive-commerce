@@ -81,6 +81,34 @@ abstract class AbstractSource implements Source
         return '';
     }
 
+    /**
+     * Whether this config's feed carries a category tree the operator
+     * can pick from (Importa → "Solo alcune categorie") and that
+     * `options.category_filter` narrows. Default false: the picker is
+     * simply not offered, rather than listing a tree that the filter
+     * would then not honour.
+     *
+     * @param array<string, mixed> $config
+     */
+    public function hasCategories(array $config): bool
+    {
+        return false;
+    }
+
+    /**
+     * [category, subcategory] of a fetched item — the node of the tree
+     * the category picker counts it under. null when the item has no
+     * category concept at all. Must agree with how the source applies
+     * `options.category_filter`, or the counts in the picker stop being
+     * the numbers the import touches.
+     *
+     * @return array{0: string, 1: string}|null
+     */
+    public function categoryPath(FeedItem $item): ?array
+    {
+        return null;
+    }
+
     // ─── Helpers ───────────────────────────────────────────────────
 
     /**
