@@ -1114,3 +1114,41 @@
     .hsync-wrap .hsync-subs { padding-left: 40px; }
     .hsync-wrap .hsync-cat-row { flex-wrap: wrap; }
 }
+
+/* ─── Catalogo e prezzi ─────────────────────────────────────── */
+.hsync-wrap .hsync-mult {
+    width: 64px; min-height: 28px; padding: 0 6px; text-align: right;
+    font-variant-numeric: tabular-nums; font-size: 13px;
+}
+.hsync-wrap .hsync-mult::placeholder { color: #a7aaad; }
+.hsync-wrap .hsync-mult.is-invalid { border-color: #d63638; box-shadow: 0 0 0 1px #d63638; }
+.hsync-wrap .hsync-cat-default label { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 14px; font-weight: 600; color: #1d2327; }
+.hsync-wrap .hsync-cat-default .hsync-mult { width: 80px; font-size: 15px; min-height: 34px; }
+.hsync-wrap .hsync-cat-default .hsync-feed-note { margin-top: 6px; max-width: 760px; }
+.hsync-wrap .hsync-cat-head {
+    display: flex; gap: 12px; padding: 6px 12px 6px 40px; font-size: 11px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.04em; color: #646970; border-bottom: 1px solid #f0f0f1;
+}
+.hsync-wrap .hsync-cat-head span:first-child { flex: 1; }
+.hsync-wrap .hsync-cat-head span:nth-child(3) { width: 84px; text-align: right; }
+.hsync-wrap .hsync-cat-mult { flex: 0 0 84px; text-align: right; font-size: 12px; color: #646970; white-space: nowrap; }
+.hsync-wrap .hsync-cat-table .hsync-cat-count { margin-left: auto; }
+.hsync-wrap .hsync-cat-table .hsync-sub .hsync-cat-count { margin-left: auto; }
+.hsync-wrap .hsync-cat-table .hsync-sub { padding-right: 0; }
+.hsync-wrap .hsync-cat-table .hsync-subs { padding-right: 12px; }
+.hsync-wrap .hsync-cats-foot[hidden] { display: none; }
+.hsync-wrap .hsync-cat-save { display: grid; gap: 8px; }
+.hsync-wrap .hsync-cat-save .hsync-actions { margin-top: 0; }
+.hsync-wrap .hsync-cat-dirty { font-size: 13px; color: #b26200; }
+.hsync-wrap .hsync-cat-save .hsync-job-flash .button { margin-left: 8px; vertical-align: middle; }
+
+.hsync-wrap .hsync-feed-facts { display: grid; gap: 3px; font-size: 13px; margin-top: 4px; }
+.hsync-wrap .hsync-feed-k {
+    display: inline-block; min-width: 52px; font-size: 11px; font-weight: 600; text-transform: uppercase;
+    letter-spacing: 0.04em; color: #646970;
+}
+.hsync-wrap .hsync-qi-note .dashicons { font-size: 14px; width: 14px; height: 14px; vertical-align: text-bottom; }
+@media (max-width: 782px) {
+    .hsync-wrap .hsync-cat-head { display: none; }
+    .hsync-wrap .hsync-cat-mult { flex-basis: auto; }
+}

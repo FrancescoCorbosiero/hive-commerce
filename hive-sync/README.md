@@ -8,21 +8,26 @@ logic; without it falls back to a generic Woo upsert.
 
 ## Per il cliente (vista semplice, default)
 
-Tre tab, nient'altro:
+Quattro tab, nient'altro:
 
 - **Panoramica** — "Tutto in ordine" (o cosa controllare) e una scheda per
   fornitore: accesa/spenta, ogni quanto, *aggiungi da sola i nuovi prodotti*,
   **Sincronizza ora**, ultimo risultato in parole.
+- **Catalogo e prezzi** — per ogni fornitore: *prezzo di vendita = costo ×
+  N*, cosa sincronizzare (tutto il catalogo o solo le categorie spuntate) e,
+  se serve, un ricarico diverso per categoria o sottocategoria. La sync
+  automatica importa e aggiorna solo quello, a quei prezzi; i prodotti tolti
+  dal fornitore vengono comunque nascosti.
 - **Importa prodotti** — scegli il fornitore e **tutto il catalogo o solo
   alcune categorie** (StockFirmati: elenco categoria → sottocategoria con
   quanti prodotti ha il fornitore e quanti sono già nel negozio), poi un
   bottone. Progresso, Interrompi, Riprendi.
 - **Storico** — quando, cosa (anche "solo Calzature"), esito, risultato.
 
-Catalogo curato: spegni *aggiungi da sola i nuovi prodotti* sulla scheda
-(la sync aggiorna prezzi/disponibilità dei prodotti già nel negozio e
-nasconde quelli che il fornitore non vende più) e porta dentro le
-categorie che vuoi da **Importa prodotti**.
+Catalogo curato: in **Catalogo e prezzi** scegli *solo le categorie
+spuntate* (la sync importa e mantiene solo quelle), oppure spegni *aggiungi
+da sola i nuovi prodotti* sulla scheda e porta dentro tu le categorie da
+**Importa prodotti**.
 
 ## Quickstart (sviluppatore, Modalità avanzata)
 
@@ -108,9 +113,10 @@ ultimo import / catalogo Woo / quick-tick button, refresh ogni 30s).
 "category_filter": "sneak"                                  // legacy: sottostringa di CAT o SUBCAT
 ```
 
-Solo il flavor StockFirmati ha un albero di categorie. Un run con
-filtro vede una fetta del feed: la spazzata dei prodotti delistati non
-gira (lo dice nel report), i ripristini sì.
+Solo il flavor StockFirmati ha un albero di categorie. Il runner filtra
+dopo aver visto il feed intero, quindi la spazzata dei delistati resta
+attiva anche su una sync per categoria (delistato = assente da tutto il
+feed); i ripristini si limitano alla fetta.
 
 ## Sources
 

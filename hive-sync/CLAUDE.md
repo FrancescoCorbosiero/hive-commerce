@@ -39,6 +39,7 @@ Stato attuale (branch `claude/stabilize-hive-sync-plugin-FZjmQ`):
 - ✅ **Oscuramento dei prodotti spariti dal feed** (`options.retire_missing`) — il 5° bucket, reversibile e con freno anti-feed-troncato
 - ✅ **Vista semplice per il cliente** (default) — Panoramica · Importa prodotti · Storico; tutto il resto dietro "Modalità avanzata". Vedi "Lessons learned / La vista semplice lavora per automazioni"
 - ✅ **Import per categoria** (StockFirmati) — picker CAT → SUBCAT con conteggi dal feed e "già nel negozio"; `category_filter` con path esatti. Vedi "Lessons learned / Import per categoria"
+- ✅ **Catalogo e prezzi** (vista semplice) — il cliente sceglie cosa sincronizza ogni fornitore (tutto / solo categorie) e i ricarichi (predefinito + per categoria). Sync per categoria sicura: la spazzata confronta col feed intero. Vedi "Lessons learned / Sync per categoria e ricarichi"
 
 ---
 
@@ -146,6 +147,7 @@ hive-sync/
 │       └── Simple/                         Vista semplice (tutto puro, unit-testato):
 │           ├── FeedOverview.php              job → card della Panoramica (cosa mostrare/nascondere).
 │           ├── SimpleSettings.php            preset frequenza + "aggiungi nuovi" ↔ buckets.
+│           ├── MarginSettings.php            "prezzo = costo × N" (+ per categoria) ↔ sf_markup_value / markup_rules.
 │           └── FeedCategorySnapshot.php      cache compatta SKU → categoria del feed.
 └── assets/
     ├── css/admin.css                       Cockpit styling, sticky tabs, HUD stats.
@@ -547,6 +549,7 @@ semplice, così niente di tecnico lampeggia prima del JS.
 | Vista | Tab | data-tab | Scopo |
 |---|---|---|---|
 | sempre | Panoramica | `home` | Riga di stato ("Tutto in ordine" / cosa controllare) + una card per automazione: accesa/spenta, frequenza (preset), "aggiungi da sola i nuovi prodotti", Sincronizza ora / Interrompi, ultimo esito in parole |
+| sempre | Catalogo e prezzi | `catalog` | Per fornitore: ricarico predefinito, cosa vendere (tutto / solo le categorie spuntate), ricarico per categoria o sottocategoria. Lo scope va sul job, i ricarichi sulla source-config |
 | sempre | Importa prodotti | `import` | Fornitore → tutto il catalogo **o solo alcune categorie** (picker) → un bottone; progresso, Interrompi, Riprendi |
 | sempre | Storico | `runs` | In semplice: quando / cosa (+ "solo Calzature") / esito / risultato in parole. In avanzata: le colonne tecniche + pulizia |
 | avanzata | 1 Connetti | `sources` | Saved source-configs (URL + auth) per sorgente |
@@ -1011,7 +1014,7 @@ può restituire meno del vero è un modo di spegnere un catalogo vivo:
 | ratio > `retire_max_ratio` (default 35%) | feed troncato a metà. Sotto 20 prodotti posseduti non si applica: il churn assoluto piccolo è normale |
 | `options.skus` | il run vede solo gli SKU incollati: tutto il resto sarebbe "assente" per definizione |
 | `options.limit` | è un run di prova. Oscurare migliaia di prodotti partendo da "provane 50" è l'opposto di ciò che il cap chiede |
-| `options.category_filter` | **il caso che il ratio guard NON copre.** Il job scarica una fetta del catalogo di proposito (la forma SF "un job per categoria"): tutto ciò che sta fuori dalla fetta risulta sparito, e due job con filtri diversi che condividono una provenance si oscurerebbero i prodotti a vicenda ad ogni tick. Una fetta che tiene il 70% del catalogo oscura il restante 30%, comodamente sotto soglia |
+| `options.category_filter` — **solo** su sorgenti che filtrano dentro `fetch()` (non SF: vedi "Sync per categoria e ricarichi") | **il caso che il ratio guard NON copre.** Il job scarica una fetta del catalogo di proposito (la forma SF "un job per categoria"): tutto ciò che sta fuori dalla fetta risulta sparito, e due job con filtri diversi che condividono una provenance si oscurerebbero i prodotti a vicenda ad ogni tick. Una fetta che tiene il 70% del catalogo oscura il restante 30%, comodamente sotto soglia |
 | `mode = media_only` | quel branch non scrive sui prodotti |
 | provenance vuota | la source non marca ciò che crea → non si può dimostrare la proprietà → non si tocca niente |
 
@@ -1315,14 +1318,12 @@ Invarianti:
 - **Mai credenziali al browser.** `FeedOverview` non manda la config del
   job; un job con config *inline* non è importabile dalla vista semplice
   (le credenziali dovrebbero viaggiare a ogni tick).
-- **"Aggiungi da sola i nuovi prodotti" spento è il modello per un
-  catalogo curato:** la sync mantiene prezzi/stock e nasconde i delistati
-  (la spazzata gira sul feed **intero**, quindi resta sicura), e i nuovi
-  prodotti entrano solo da "Importa prodotti", anche per categoria. Per
-  questo la vista semplice **non** offre il filtro categorie sui job: un
-  job con `category_filter` disattiva la spazzata (vedi sotto) e lo SKU
-  delistato tornerebbe acquistabile — il bug che il cliente ci ha già
-  segnalato una volta.
+- **Due modi di curare il catalogo:** "Catalogo e prezzi" → *solo le
+  categorie spuntate* (la sync importa e mantiene solo quelle), oppure
+  "aggiungi da sola i nuovi prodotti" spento (la sync mantiene solo ciò
+  che è già nel negozio; i nuovi entrano da "Importa prodotti"). In
+  entrambi la spazzata dei delistati resta attiva e sicura — vedi "Sync
+  per categoria e ricarichi".
 
 **Il tick loop ha un listener, non un fork.** "Importa prodotti" usa lo
 stesso `HSync.runImportTicked` di Import manuale e della riparazione
@@ -1399,6 +1400,63 @@ Playwright — picker, import per categoria (conteggi = prodotti creati),
 ora via scheduler + lease, switch di modalità, larghezza telefono. Coperto
 da `CategoryFilterTest`, `SfCategoryFilterTest`, `Workflow/Simple/*`.
 
+### Sync per categoria e ricarichi
+
+**Richiesta (dopo il primo giro):** il cliente deve poter configurare da
+solo i **ricarichi** — per lui la cosa più importante — e avere una sync
+automatica che scarichi **solo certe categorie** con **certi ricarichi**.
+
+**Il problema del filtro sui job.** `category_filter` era applicato
+dentro `CsvSource::fetch()`: il runner vedeva solo la fetta, e la
+spazzata dei delistati avrebbe letto ogni prodotto fuori dalla fetta come
+"sparito" — per questo era bloccata (`retire_skipped = category_filter`),
+cioè una sync per categoria lasciava in vendita per sempre gli SKU tolti
+dal fornitore.
+
+**Soluzione: il runner filtra dopo aver visto il feed intero.** Per le
+sorgenti con categorie (`hasCategories()`), `ImportRunner` toglie
+`category_filter` dalle opzioni passate a `fetch()`, cattura
+`$allFeedSkus` sul feed **completo**, poi restringe gli item con
+`CategoryFilter` + `categoryPath()`. Conseguenze:
+
+- **Delistato = assente dall'intero feed**, non dalla fetta: un prodotto
+  di un'altra categoria ancora in listino non è mai "mancante", e due
+  job con fette diverse non si oscurano a vicenda. Il blocco
+  `category_filter` resta solo per le sorgenti che filtrano in `fetch()`
+  (CSV generico, che comunque non ha provenance).
+- **I ripristini restano nella fetta**: un prodotto riportato fuori dalle
+  categorie scelte riapparirebbe con lo stock con cui era stato
+  oscurato, perché nulla in quel run lo rifornisce.
+- `fetched` è il feed intero (come per `skus`); la fetta è
+  `new + update + update_stock + unchanged`.
+
+Verificato su harness MariaDB: sync "solo Calzature" → 24 creati, 14
+Borse possedute **non** mancanti; tolti dal feed uno Sneaker e una Borsa
+→ `missing = 2`, esattamente quei due.
+
+**I ricarichi nella vista semplice (`MarginSettings`).** Il ricarico
+resta della source-config (applicato in fetch, idempotente: sempre dal
+costo grezzo, mai composto). Il cliente vede "prezzo di vendita = costo
+× N" e, per SF, una N per categoria o sottocategoria:
+
+| Editor | Source-config |
+|---|---|
+| predefinito ×N | `sf_markup_mode = multiplier`, `sf_markup_value = N` |
+| "Cat" ×N | regola `_sf_category equals Cat`, percent (N−1)·100 |
+| "Cat › Sub" ×N | regola `_sf_taxonomy equals "Cat > Sub"`, percent (N−1)·100 |
+
+Sottocategorie prima delle categorie (vince la prima regola). Le regole
+scritte a mano (per marca, `contains`, `_sf_taxonomy` senza `>`…) non
+sono "ricarichi di categoria": restano intatte e **prima**, nell'ordine
+di precedenza che avevano, e l'editor dice che esistono. Feed generici
+(GS): solo il predefinito (`markup_percent`). KicksDB: non supportato
+(ha il suo blocco markup). Valori fuori da 1–20 rifiutati lato server.
+
+Cambiare un ricarico non richiede re-import: la sync successiva (o
+"Sincronizza ora") riallinea i prezzi, perché il diff SF confronta il
+prezzo. `MarginSettingsTest::testTheFetchAppliesWhatTheEditorWrote`
+passa dall'editor alla fetch reale e controlla i prezzi.
+
 ---
 
 ## What NOT to add
@@ -1418,12 +1476,13 @@ da `CategoryFilterTest`, `SfCategoryFilterTest`, `Workflow/Simple/*`.
 - **Match tassonomia Woo nelle markup_rules** — match feed-field è
   più veloce, equivalente per catalog feed-driven, e funziona per
   prodotti non ancora in Woo.
-- **Filtro categorie sui job nella vista semplice** — un job con
-  `category_filter` disattiva la spazzata dei delistati (il feed visto è
-  una fetta): lo SKU tolto dal fornitore tornerebbe acquistabile. Il
-  catalogo curato si fa con "aggiungi da sola i nuovi prodotti" spento +
-  import per categoria. Vedi "Lessons learned / La vista semplice lavora
-  per automazioni".
+- **Filtro categorie dentro `fetch()` per sorgenti con categorie** — il
+  runner deve vedere il feed intero prima di restringere, o la spazzata
+  scambia "fuori dalla fetta" per "delistato". Vedi "Sync per categoria e
+  ricarichi".
+- **Ricarichi per job** — il ricarico è della source-config (lo applica la
+  fetch, idempotente). Due job sullo stesso feed con prezzi diversi
+  scriverebbero gli stessi prodotti a prezzi alterni.
 - **Controlli tecnici nella vista semplice** (cron, bucket, limiti,
   dry-run, mapping, JSON): vanno nei tab avanzati. Ogni controllo in più
   per il cliente è un modo in più di rompere la sync.

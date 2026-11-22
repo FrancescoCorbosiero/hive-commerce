@@ -460,8 +460,11 @@
         $$('.hsync-panel').forEach(p => {
             p.classList.toggle('is-active', p.dataset.panel === name);
         });
-        if (name === 'home')      HSync.loadOverview();
+        // Redraw from the state we have first (a save elsewhere may have
+        // refreshed it), then refetch: never show the previous render.
+        if (name === 'home')      { if (HSync.state.overview) HSync.renderHome(); HSync.loadOverview(); }
         if (name === 'import')    HSync.openImport();
+        if (name === 'catalog')   HSync.openCatalog();
         if (name === 'mappings')  HSync.loadMappings();
         if (name === 'runs')      HSync.loadRuns();
         if (name === 'pipelines') HSync.loadPipelines();
@@ -3947,7 +3950,7 @@
     // includes/ajax-simple.php). The technical tabs are untouched and sit
     // behind "Modalità avanzata".
 
-    HSync.SIMPLE_TABS  = ['home', 'import', 'runs'];
+    HSync.SIMPLE_TABS  = ['home', 'catalog', 'import', 'runs'];
     HSync.ADVANCED_KEY = 'hsync.advanced';
 
     HSync.isAdvanced = function () {
@@ -4212,8 +4215,13 @@
                     + (c.hides_missing ? ' I prodotti che il fornitore non vende più vengono nascosti dal negozio (e tornano se riappaiono).' : '')
                     + '</div>';
             }
-            if (c.categories_label) {
-                settings += '<div class="hsync-feed-note"><span class="dashicons dashicons-category" aria-hidden="true"></span> Solo le categorie: <strong>' + esc(c.categories_label) + '</strong></div>';
+            if (c.importable) {
+                settings += '<div class="hsync-feed-facts">'
+                    + '<div><span class="hsync-feed-k">Vende</span> ' + (c.categories_label ? 'solo <strong>' + esc(c.categories_label) + '</strong>' : 'tutto il catalogo del fornitore') + '</div>'
+                    + (c.margins_label ? '<div><span class="hsync-feed-k">Prezzi</span> costo <strong>' + esc(c.margins_label) + '</strong></div>' : '')
+                    + '</div>';
+            } else if (c.categories_label) {
+                settings += '<div class="hsync-feed-note">Solo le categorie: <strong>' + esc(c.categories_label) + '</strong></div>';
             }
         }
 
@@ -4230,6 +4238,8 @@
                 actions.push('<button type="button" class="button" data-action="feed-stop" data-id="' + c.id + '"' + (control === 'stop' ? ' disabled' : '') + '>Interrompi</button>');
             }
             if (c.importable) {
+                actions.push('<button type="button" class="button" data-action="feed-catalog" data-id="' + c.id + '">'
+                    + '<span class="dashicons dashicons-tag" aria-hidden="true"></span> Catalogo e prezzi</button>');
                 actions.push('<button type="button" class="button" data-action="feed-import" data-id="' + c.id + '">'
                     + '<span class="dashicons dashicons-download" aria-hidden="true"></span> '
                     + (c.has_categories ? 'Importa per categoria' : 'Importa prodotti') + '</button>');
@@ -4634,39 +4644,49 @@
         return t ? (t.categories || []).find(c => c.value === value) || null : null;
     };
 
-    HSync.qiToggleCat = function (value, on) {
-        const qi  = HSync.state.qi;
-        const cat = HSync.qiCatByValue(value);
+    /**
+     * Category selection over a picker state {tree, selected:Set}: the
+     * Importa picker and the Catalogo e prezzi table share it.
+     */
+    HSync.pickCat = function (st, value, on) {
+        const cat = st.tree ? (st.tree.categories || []).find(c => c.value === value) : null;
         if (!cat) return;
         // The whole category replaces any of its subcategories.
-        (cat.subs || []).forEach(s => qi.selected.delete(s.value));
-        if (on) qi.selected.add(cat.value); else qi.selected.delete(cat.value);
+        (cat.subs || []).forEach(s => st.selected.delete(s.value));
+        if (on) st.selected.add(cat.value); else st.selected.delete(cat.value);
+    };
+
+    HSync.pickSub = function (st, catValue, value, on) {
+        const cat = st.tree ? (st.tree.categories || []).find(c => c.value === catValue) : null;
+        if (!cat) return;
+        const subs = cat.subs || [];
+        if (st.selected.has(cat.value)) {
+            // The whole category was ticked: unticking one subcategory
+            // keeps all the others.
+            st.selected.delete(cat.value);
+            subs.forEach(s => { if (s.value !== value) st.selected.add(s.value); });
+        } else if (on) {
+            st.selected.add(value);
+        } else {
+            st.selected.delete(value);
+        }
+        // Every subcategory ticked and together they ARE the category
+        // (no product without a subcategory left out): one entry.
+        const covered = subs.reduce((n, s) => n + (s.count || 0), 0) === cat.count;
+        if (subs.length && covered && subs.every(s => st.selected.has(s.value))) {
+            subs.forEach(s => st.selected.delete(s.value));
+            st.selected.add(cat.value);
+        }
+    };
+
+    HSync.qiToggleCat = function (value, on) {
+        HSync.pickCat(HSync.state.qi, value, on);
         HSync.renderImportList();
         HSync.renderImportAction();
     };
 
     HSync.qiToggleSub = function (catValue, value, on) {
-        const qi  = HSync.state.qi;
-        const cat = HSync.qiCatByValue(catValue);
-        if (!cat) return;
-        const subs = cat.subs || [];
-        if (qi.selected.has(cat.value)) {
-            // The whole category was ticked: unticking one subcategory
-            // keeps all the others.
-            qi.selected.delete(cat.value);
-            subs.forEach(s => { if (s.value !== value) qi.selected.add(s.value); });
-        } else if (on) {
-            qi.selected.add(value);
-        } else {
-            qi.selected.delete(value);
-        }
-        // Every subcategory ticked and together they ARE the category
-        // (no product without a subcategory left out): one entry.
-        const covered = subs.reduce((n, s) => n + (s.count || 0), 0) === cat.count;
-        if (subs.length && covered && subs.every(s => qi.selected.has(s.value))) {
-            subs.forEach(s => qi.selected.delete(s.value));
-            qi.selected.add(cat.value);
-        }
+        HSync.pickSub(HSync.state.qi, catValue, value, on);
         HSync.renderImportList();
         HSync.renderImportAction();
     };
@@ -4730,11 +4750,19 @@
             label = 'Importa tutto il catalogo';
             if (qi.tree && qi.tree.total) note = HSync.num(qi.tree.total) + ' prodotti nel listino del fornitore';
         }
+        // The price the products will get, BEFORE clicking: the margins
+        // live on the supplier (Catalogo e prezzi), not on this import.
+        const prices = feed.margins_label
+            ? '<div class="hsync-qi-note"><span class="dashicons dashicons-tag" aria-hidden="true"></span> Prezzo di vendita: costo '
+              + esc(feed.margins_label)
+              + ' · <button type="button" class="button-link" data-action="feed-catalog" data-id="' + feed.id + '">Cambia i ricarichi</button></div>'
+            : '';
         el.innerHTML = ''
             + '<span class="hsync-qi-num">3</span>'
             + '<div class="hsync-qi-go-body">'
             +   '<button type="button" class="button button-primary button-hero" data-action="qi-start"' + (disabled ? ' disabled' : '') + '>' + esc(label) + '</button>'
             +   (note ? '<div class="hsync-qi-note">' + note + '</div>' : '')
+            +   prices
             + '</div>';
     };
 
@@ -4919,7 +4947,9 @@
         }
         if (qi.phase === 'done') {
             const touched = QI_RESULT_KEYS.some(k => k !== 'skipped' && (s[k] || 0) > 0);
-            const empty   = (s.fetched || 0) === 0;
+            // The slice, not `fetched`: with a category filter `fetched`
+            // is the whole feed and the slice is what the diff classified.
+            const empty   = ((s.new || 0) + (s.update || 0) + (s.update_stock || 0) + (s.unchanged || 0)) === 0;
             const head = empty
                 ? 'Il fornitore non ha restituito prodotti per questa scelta.'
                 : (touched ? 'Importazione completata in ' + elapsed : 'Niente da fare: era già tutto aggiornato.');
@@ -4946,6 +4976,446 @@
             + (qi.resumable ? '<p class="hsync-qi-run-hint">Riprendendo, continua da dove si era fermata: i prodotti già fatti non vengono rifatti.</p>' : ''),
             (qi.resumable ? '<button type="button" class="button button-primary" data-action="qi-resume">Riprendi da dove si era fermata</button>' : '')
             + '<button type="button" class="button" data-action="qi-reset">Chiudi</button>');
+    };
+
+    // ── Catalogo e prezzi ─────────────────────────────────────────
+    //
+    // Per supplier: the default markup ("prezzo = costo × N"), what the
+    // automatic sync sells (everything / only the ticked categories) and
+    // an optional markup per category. Scope is saved on the automation,
+    // margins on the supplier's config — see catalog_settings_save.
+
+    HSync.state.cat = {
+        jobId: 0, settings: null, error: '',
+        tree: null, treeLoading: false, treeError: '',
+        scope: 'all', selected: new Set(), expanded: new Set(), search: '',
+        def: '', margins: {}, orphanMargins: {},
+        dirty: false, saving: false, msg: null,
+    };
+
+    /** "3,5" ← 3.5; '' for nothing. */
+    HSync.fmtMult = function (n) {
+        if (n === null || n === undefined || n === '' || isNaN(Number(n))) return '';
+        return String(Math.round(Number(n) * 1000) / 1000).replace('.', ',');
+    };
+    /** "3,5" / "3.5" → 3.5; NaN when not a number; null when empty. */
+    HSync.parseMult = function (v) {
+        const t = String(v == null ? '' : v).trim().replace(',', '.');
+        if (t === '') return null;
+        return /^\d+(\.\d+)?$/.test(t) ? Number(t) : NaN;
+    };
+
+    HSync.openCatalog = async function (jobId, fromSelect) {
+        const st = HSync.state.cat;
+        if (jobId && HSync.state.currentTab !== 'catalog') {
+            st.pendingJob = jobId;
+            return HSync.switchTab('catalog');
+        }
+        if (!HSync.state.overview) {
+            HSync.renderCatalog();
+            await HSync.loadOverview();
+        }
+        const feeds = HSync.importableFeeds();
+        let want = jobId || st.pendingJob || st.jobId;
+        st.pendingJob = 0;
+        if (!feeds.some(f => f.id === want)) want = feeds.length ? (feeds.find(f => f.has_categories) || feeds[0]).id : 0;
+        if (st.dirty && want !== st.jobId && !confirm('Ci sono modifiche non salvate. Cambiare fornitore e perderle?')) {
+            return HSync.renderCatalog();
+        }
+        if (want !== st.jobId || !st.settings || fromSelect) {
+            st.jobId = want;
+            st.tree = null;
+            return HSync.catLoad(true);
+        }
+        HSync.renderCatalog();
+    };
+
+    /** Settings (scope + margins) and, for feeds with categories, the tree. */
+    HSync.catLoad = async function (resetEdits) {
+        const st = HSync.state.cat;
+        if (resetEdits && st.dirty && st.settings && !confirm('Annullare le modifiche non salvate?')) return;
+        Object.assign(st, { settings: null, error: '', dirty: false, msg: null, search: '' });
+        HSync.renderCatalog();
+        if (!st.jobId) return;
+        const jobId = st.jobId;
+        try {
+            const s = await HSync.ajax('catalog_settings', { job_id: jobId });
+            if (st.jobId !== jobId) return;
+            st.settings = s;
+            st.scope    = s.scope;
+            st.selected = new Set(s.scope === 'cats' ? s.categories : []);
+            st.expanded = new Set();
+            st.def      = HSync.fmtMult(s.margins.default);
+        } catch (e) {
+            st.error = e.message;
+            return HSync.renderCatalog();
+        }
+        HSync.renderCatalog();
+        if (st.settings.has_categories) HSync.catLoadTree(false);
+    };
+
+    HSync.catLoadTree = async function (refresh) {
+        const st = HSync.state.cat;
+        const jobId = st.jobId;
+        st.treeLoading = true; st.treeError = '';
+        HSync.renderCatTable();
+        try {
+            const t = await HSync.ajax('feed_categories', { job_id: jobId, refresh: refresh ? '1' : '' });
+            if (st.jobId !== jobId) return;
+            st.tree = t.supported ? t : null;
+        } catch (e) {
+            if (st.jobId !== jobId) return;
+            st.treeError = e.message;
+        }
+        st.treeLoading = false;
+        HSync.catAdoptTree();
+        HSync.renderCatalog();
+    };
+
+    /**
+     * Line the saved values up with the tree's own spelling (matching is
+     * case-insensitive), keeping the ones the feed no longer lists so a
+     * save never silently drops them.
+     */
+    HSync.catAdoptTree = function () {
+        const st = HSync.state.cat;
+        if (!st.tree || !st.settings) return;
+        const byNorm = {};
+        (st.tree.categories || []).forEach(c => {
+            byNorm[HSync.qiNorm(c.value)] = c.value;
+            (c.subs || []).forEach(s => { byNorm[HSync.qiNorm(s.value)] = s.value; });
+        });
+        if (!st.dirty) {
+            st.margins = {}; st.orphanMargins = {};
+            Object.entries(st.settings.margins.categories || {}).forEach(([v, n]) => {
+                const hit = byNorm[HSync.qiNorm(v)];
+                if (hit) st.margins[hit] = HSync.fmtMult(n); else st.orphanMargins[v] = n;
+            });
+            const sel = new Set();
+            st.selected.forEach(v => sel.add(byNorm[HSync.qiNorm(v)] || v));
+            st.selected = sel;
+        }
+    };
+
+    HSync.catFeed = function () {
+        const id = HSync.state.cat.jobId;
+        return HSync.importableFeeds().find(f => f.id === id) || null;
+    };
+
+    HSync.renderCatalog = function () {
+        const st   = HSync.state.cat;
+        const root = $('[data-region="cat"]');
+        if (!root) return;
+        if (!HSync.state.overview) { root.innerHTML = '<p class="hsync-loading">Caricamento…</p>'; return; }
+        const feeds = HSync.importableFeeds();
+        if (!feeds.length) {
+            root.innerHTML = '<div class="hsync-empty-state"><span class="dashicons dashicons-admin-plugins" aria-hidden="true"></span>'
+                + '<h3>Nessun fornitore collegato</h3><p>Serve prima il collegamento al feed di un fornitore. Se non l\'hai fatto tu, chiedilo a chi ha configurato il sito.</p></div>';
+            return;
+        }
+        const feed = HSync.catFeed();
+        const feedPick = feeds.length === 1
+            ? '<strong class="hsync-qi-feedname">' + esc(feeds[0].label) + '</strong>'
+            : '<select data-action="cat-feed">' + feeds.map(f => '<option value="' + f.id + '"' + (f.id === st.jobId ? ' selected' : '') + '>' + esc(f.label) + '</option>').join('') + '</select>';
+        let body;
+        if (st.error) {
+            body = '<div class="hsync-error">' + esc(st.error) + ' <button type="button" class="button-link" data-action="cat-retry">Riprova</button></div>';
+        } else if (!st.settings) {
+            body = '<p class="hsync-loading">Caricamento…</p>';
+        } else {
+            const s = st.settings;
+            const m = s.margins;
+            const sfNote = s.has_categories
+                ? 'Il prezzo pieno del fornitore resta come prezzo di listino (barrato); il ricarico decide il prezzo di vendita.'
+                : '';
+            const margin = !m.supported
+                ? '<p class="hsync-qi-hint">I prezzi di questo fornitore si impostano in modalità avanzata.</p>'
+                : '<div class="hsync-cat-default">'
+                  + '<label>Prezzo di vendita = costo del fornitore × '
+                  +   '<input type="text" inputmode="decimal" class="hsync-mult" data-action="cat-default" value="' + esc(st.def) + '" aria-label="Ricarico predefinito"></label>'
+                  + '<div class="hsync-feed-note">Esempio: costo 40 € × ' + esc(st.def || '?') + ' = '
+                  +   esc(HSync.catExample(st.def)) + '. ' + sfNote
+                  +   (m.by_category ? ' Puoi dare un ricarico diverso a singole categorie qui sotto.' : '') + '</div>'
+                  + (m.custom_rules ? '<div class="hsync-feed-note">Ci sono anche ' + m.custom_rules + (m.custom_rules === 1 ? ' regola personalizzata' : ' regole personalizzate')
+                      + ' (es. per marca) impostate in modalità avanzata: hanno la precedenza su quelle qui.</div>' : '')
+                  + '</div>';
+            const scope = s.has_categories
+                ? (s.scope === 'custom'
+                    ? '<p class="hsync-qi-hint">Questa automazione usa un filtro categorie scritto a mano (' + esc(HSync.describeCategoryFilter(s.categories)) + '): si cambia in modalità avanzata.</p>'
+                    : '<div class="hsync-qi-scopes" role="radiogroup" aria-label="Cosa vendere">'
+                      + HSync.catRadio('all', 'Tutto il catalogo', 'La sincronizzazione importa e aggiorna tutti i prodotti del fornitore.')
+                      + HSync.catRadio('cats', 'Solo le categorie spuntate', 'Importa e aggiorna solo le categorie che scegli qui sotto.')
+                      + '</div>')
+                : '<p class="hsync-qi-hint">Questo fornitore non divide il catalogo in categorie: si sincronizza tutto il catalogo.</p>';
+            body = ''
+                + '<fieldset class="hsync-qi-step"><legend><span class="hsync-qi-num">2</span> Ricarico</legend>' + margin + '</fieldset>'
+                + '<fieldset class="hsync-qi-step"><legend><span class="hsync-qi-num">3</span> Cosa vendere' + (s.has_categories && m.by_category ? ' e ricarico per categoria' : '') + '</legend>'
+                +   scope + '<div data-region="cat-table"></div>'
+                + '</fieldset>'
+                + '<div class="hsync-cat-save" data-region="cat-save"></div>';
+        }
+        root.innerHTML = ''
+            + '<p class="hsync-lead">Scegli cosa vendere di ogni fornitore e con quale ricarico. La sincronizzazione automatica importa e aggiorna solo questo, a questi prezzi.</p>'
+            + '<div class="hsync-qi">'
+            +   '<fieldset class="hsync-qi-step"><legend><span class="hsync-qi-num">1</span> Fornitore</legend>' + feedPick
+            +     (feed && feed.config_name && feed.config_name !== feed.label ? ' <span class="hsync-muted-inline">' + esc(feed.config_name) + '</span>' : '')
+            +   '</fieldset>'
+            +   body
+            + '</div>';
+        HSync.renderCatTable();
+        HSync.renderCatSave();
+    };
+
+    HSync.catRadio = function (value, title, hint) {
+        const st = HSync.state.cat;
+        return '<label class="hsync-qi-scope' + (st.scope === value ? ' is-on' : '') + '">'
+            + '<input type="radio" name="hsync-cat-scope" value="' + value + '"' + (st.scope === value ? ' checked' : '') + '>'
+            + '<span><strong>' + esc(title) + '</strong><small>' + esc(hint) + '</small></span></label>';
+    };
+
+    HSync.catExample = function (mult) {
+        const n = HSync.parseMult(mult);
+        if (n === null || isNaN(n)) return '—';
+        return (40 * n).toLocaleString('it-IT', { minimumFractionDigits: 0, maximumFractionDigits: 2 }) + ' €';
+    };
+
+    HSync.renderCatTable = function () {
+        const st = HSync.state.cat;
+        const el = $('[data-region="cat-table"]');
+        if (!el || !st.settings || !st.settings.has_categories) { if (el) el.innerHTML = ''; return; }
+        if (!st.tree) {
+            el.innerHTML = st.treeError
+                ? '<div class="hsync-error">' + esc(st.treeError) + ' <button type="button" class="button-link" data-action="cat-refresh">Riprova</button></div>'
+                : '<div class="hsync-qi-wait"><span class="spinner is-active" aria-hidden="true"></span> Leggo le categorie dal fornitore… La prima volta può volerci un minuto.</div>';
+            return;
+        }
+        const t = st.tree;
+        const byCat = st.settings.margins.by_category;
+        el.innerHTML = ''
+            + '<div class="hsync-cats hsync-cat-table' + (st.scope === 'cats' ? '' : ' is-all') + '">'
+            +   '<div class="hsync-cats-bar">'
+            +     '<input type="search" class="hsync-cats-search" data-action="cat-search" placeholder="Cerca una categoria…" aria-label="Cerca una categoria" value="' + esc(st.search) + '">'
+            +     '<span class="hsync-cats-meta">' + HSync.num((t.categories || []).length) + ' categorie · ' + HSync.num(t.total) + ' prodotti in listino'
+            +       ' · <button type="button" class="button-link" data-action="cat-refresh"' + (st.treeLoading ? ' disabled' : '') + '>' + (st.treeLoading ? 'Aggiorno…' : 'Aggiorna elenco') + '</button></span>'
+            +   '</div>'
+            +   '<div class="hsync-cat-head"><span>Categoria</span><span>Prodotti</span>' + (byCat ? '<span>Ricarico</span>' : '') + '</div>'
+            +   '<ul class="hsync-cats-list" data-region="cat-list"></ul>'
+            +   '<div class="hsync-cats-foot" data-region="cat-foot"></div>'
+            + '</div>';
+        HSync.renderCatList();
+    };
+
+    HSync.renderCatList = function () {
+        const st = HSync.state.cat;
+        const el = $('[data-region="cat-list"]');
+        if (!el || !st.tree) return;
+        const byCat = st.settings.margins.by_category;
+        const picking = st.scope === 'cats';
+        const q = HSync.qiNorm(st.search);
+        const marginInput = (value, inherited) => byCat
+            ? '<span class="hsync-cat-mult">× <input type="text" inputmode="decimal" class="hsync-mult" data-action="cat-margin" data-value="' + esc(value) + '"'
+              + ' value="' + esc(st.margins[value] || '') + '" placeholder="' + esc(inherited) + '" aria-label="Ricarico"></span>'
+            : '';
+        const box = (attrs, checked) => picking
+            ? '<input type="checkbox" data-action="cat-pick" ' + attrs + (checked ? ' checked' : '') + '>'
+            : '';
+        const rows = (st.tree.categories || []).map(cat => {
+            const subs    = cat.subs || [];
+            const catHit  = !q || HSync.qiNorm(cat.name).indexOf(q) >= 0;
+            const subHits = q && !catHit ? subs.filter(s => HSync.qiNorm(s.name).indexOf(q) >= 0) : subs;
+            if (q && !catHit && !subHits.length) return '';
+            const whole   = st.selected.has(cat.value);
+            const picked  = subs.filter(s => st.selected.has(s.value)).length;
+            const open    = st.expanded.has(cat.value) || (q && !catHit) || subs.some(s => st.margins[s.value]);
+            const catMult = st.margins[cat.value] || st.def;
+            const subRows = open ? subHits.map(s =>
+                '<li class="hsync-sub">'
+                + '<label>' + box('data-cat="' + esc(cat.value) + '" data-value="' + esc(s.value) + '"', whole || st.selected.has(s.value)) + ' ' + esc(s.name) + '</label>'
+                + HSync.qiCount(s)
+                + marginInput(s.value, catMult)
+                + '</li>').join('') : '';
+            return '<li class="hsync-cat' + (picking && (whole || picked) ? ' is-picked' : '') + '">'
+                + '<div class="hsync-cat-row">'
+                +   (subs.length
+                        ? '<button type="button" class="hsync-cat-caret" data-action="cat-expand" data-value="' + esc(cat.value) + '" aria-expanded="' + (open ? 'true' : 'false') + '" title="Sottocategorie">'
+                          + '<span class="dashicons dashicons-arrow-' + (open ? 'down' : 'right') + '-alt2" aria-hidden="true"></span></button>'
+                        : '<span class="hsync-cat-caret is-empty" aria-hidden="true"></span>')
+                +   '<label class="hsync-cat-label">' + box('data-value="' + esc(cat.value) + '"' + (picked && !whole ? ' data-partial="1"' : ''), whole) + ' ' + esc(cat.name) + '</label>'
+                +   HSync.qiCount(cat)
+                +   marginInput(cat.value, st.def)
+                + '</div>'
+                + (subRows ? '<ul class="hsync-subs">' + subRows + '</ul>' : '')
+                + '</li>';
+        }).join('');
+        el.innerHTML = rows || '<li class="hsync-cats-empty">Nessuna categoria contiene «' + esc(st.search) + '».</li>';
+        $$('input[data-partial="1"]', el).forEach(cb => { cb.indeterminate = true; });
+        HSync.renderCatFoot();
+    };
+
+    /** Products in the shop that a "solo queste categorie" choice leaves out. */
+    HSync.catLeftOut = function () {
+        const st = HSync.state.cat;
+        if (!st.tree || st.scope !== 'cats') return 0;
+        let n = 0;
+        (st.tree.categories || []).forEach(cat => {
+            if (st.selected.has(cat.value)) return;
+            const subsIn = (cat.subs || []).filter(s => st.selected.has(s.value)).reduce((a, s) => a + (s.in_shop || 0), 0);
+            n += Math.max(0, (cat.in_shop || 0) - subsIn);
+        });
+        return n;
+    };
+
+    HSync.renderCatFoot = function () {
+        const st = HSync.state.cat;
+        const el = $('[data-region="cat-foot"]');
+        if (!el) return;
+        const bits = [];
+        if (st.scope === 'cats') {
+            const left = HSync.catLeftOut();
+            if (left) bits.push('<strong>' + HSync.num(left) + ' prodotti già nel negozio</strong> sono in categorie non spuntate: restano in vendita ma la sincronizzazione non aggiornerà più il loro prezzo e la disponibilità.');
+        }
+        if (st.settings && st.settings.margins.by_category) bits.push('Ricarico vuoto = quello della categoria, o quello predefinito.');
+        if (st.tree && st.tree.uncategorized) bits.push(HSync.num(st.tree.uncategorized) + (st.tree.uncategorized === 1 ? ' prodotto senza categoria entra' : ' prodotti senza categoria entrano') + ' solo con «Tutto il catalogo».');
+        el.innerHTML = bits.join('<br>');
+        el.hidden = !bits.length;
+    };
+
+    HSync.catSetScope = function (scope) {
+        const st = HSync.state.cat;
+        st.scope = scope === 'cats' ? 'cats' : 'all';
+        st.dirty = true;
+        $$('.hsync-qi-scope', $('[data-region="cat"]')).forEach(l => l.classList.toggle('is-on', l.querySelector('input').value === st.scope));
+        HSync.renderCatTable();
+        HSync.renderCatSave();
+    };
+
+    HSync.catPick = function (catValue, value, on) {
+        const st = HSync.state.cat;
+        if (catValue) HSync.pickSub(st, catValue, value, on); else HSync.pickCat(st, value, on);
+        st.dirty = true;
+        HSync.renderCatList();
+        HSync.renderCatSave();
+    };
+
+    HSync.catToggleExpand = function (value) {
+        const st = HSync.state.cat;
+        if (st.expanded.has(value)) st.expanded.delete(value); else st.expanded.add(value);
+        HSync.renderCatList();
+    };
+
+    HSync.catSearch = function (value) {
+        HSync.state.cat.search = String(value || '');
+        clearTimeout(HSync.state.catSearchTimer);
+        HSync.state.catSearchTimer = setTimeout(HSync.renderCatList, 120);
+    };
+
+    /** Typing: keep the value; on commit (change), redraw the inherited placeholders. */
+    HSync.catMarginChanged = function (input, committed) {
+        const st = HSync.state.cat;
+        const v  = String(input.value || '').trim();
+        const n  = HSync.parseMult(v);
+        input.classList.toggle('is-invalid', n !== null && (isNaN(n) || n < 1 || n > 20));
+        if (input.dataset.action === 'cat-default') st.def = v;
+        else if (v === '') delete st.margins[input.dataset.value];
+        else st.margins[input.dataset.value] = v;
+        st.dirty = true;
+        if (committed) {
+            if (input.dataset.action === 'cat-default') HSync.renderCatalog();
+            else HSync.renderCatList();
+        }
+        HSync.renderCatSave();
+    };
+
+    HSync.renderCatSave = function () {
+        const st = HSync.state.cat;
+        const el = $('[data-region="cat-save"]');
+        if (!el || !st.settings) return;
+        const feed = HSync.catFeed();
+        const shared = st.settings.shared_jobs > 1
+            ? '<div class="hsync-feed-note">I ricarichi valgono per tutte le ' + st.settings.shared_jobs + ' automazioni di questo fornitore.</div>' : '';
+        let msg = '';
+        if (st.msg) {
+            msg = '<div class="hsync-job-flash is-' + esc(st.msg.kind) + '">' + st.msg.html + '</div>';
+        }
+        el.innerHTML = ''
+            + '<div class="hsync-actions">'
+            +   '<button type="button" class="button button-primary button-hero" data-action="cat-save"' + (st.saving || !st.dirty ? ' disabled' : '') + '>'
+            +     (st.saving ? 'Salvo…' : 'Salva') + '</button>'
+            +   (st.dirty ? '<span class="hsync-cat-dirty">Modifiche non salvate · <button type="button" class="button-link" data-action="cat-reset">Annulla</button></span>' : '')
+            + '</div>'
+            + shared + msg
+            + (feed && !feed.enabled ? '<div class="hsync-feed-note">La sincronizzazione automatica di questo fornitore è spenta: si accende dalla Panoramica.</div>' : '');
+    };
+
+    HSync.catSave = async function () {
+        const st = HSync.state.cat;
+        const s  = st.settings;
+        if (!s || st.saving) return;
+        const payload = { job_id: st.jobId };
+        if (s.margins.supported) {
+            const def = HSync.parseMult(st.def);
+            if (def === null || isNaN(def) || def < 1 || def > 20) {
+                st.msg = { kind: 'err', html: 'Il ricarico predefinito deve essere un numero tra 1 e 20 (es. 3,5).' };
+                return HSync.renderCatSave();
+            }
+            payload.default = String(def);
+            if (s.margins.by_category) {
+                const out = Object.assign({}, st.orphanMargins);
+                for (const [v, raw] of Object.entries(st.margins)) {
+                    const n = HSync.parseMult(raw);
+                    if (n === null) continue;
+                    if (isNaN(n) || n < 1 || n > 20) {
+                        st.msg = { kind: 'err', html: 'Ricarico non valido per «' + esc(HSync.describeCategoryFilter([v])) + '»: usa un numero tra 1 e 20.' };
+                        return HSync.renderCatSave();
+                    }
+                    out[v] = n;
+                }
+                payload.margins = out;
+            }
+        }
+        if (s.has_categories && s.scope !== 'custom') {
+            payload.scope = st.scope;
+            if (st.scope === 'cats') {
+                if (!st.selected.size) {
+                    st.msg = { kind: 'err', html: 'Spunta almeno una categoria, oppure scegli «Tutto il catalogo».' };
+                    return HSync.renderCatSave();
+                }
+                payload.categories = Array.from(st.selected);
+            }
+        }
+        st.saving = true; st.msg = null;
+        HSync.renderCatSave();
+        try {
+            const r = await HSync.ajax('catalog_settings_save', payload);
+            st.dirty = false;
+            const when = r.enabled && r.next_run_at ? ' alla prossima sincronizzazione (' + esc(HSync.fmtWhen(r.next_run_at)) + ')' : ' alla prossima sincronizzazione';
+            st.msg = { kind: 'ok', html: 'Salvato. Prodotti e prezzi si aggiornano' + when + '.'
+                + (r.running ? ' Quella in corso finisce con le impostazioni di prima.' : '')
+                + ' <button type="button" class="button" data-action="cat-sync">Sincronizza ora</button>' };
+            await HSync.loadOverview();
+            const fresh = await HSync.ajax('catalog_settings', { job_id: st.jobId });
+            st.settings = fresh;
+            st.def = HSync.fmtMult(fresh.margins.default);
+            HSync.catAdoptTree();
+        } catch (e) {
+            st.msg = { kind: 'err', html: esc(e.message) };
+        }
+        st.saving = false;
+        HSync.renderCatalog();
+    };
+
+    HSync.catSyncNow = async function () {
+        const st = HSync.state.cat;
+        st.msg = { kind: 'ok', html: 'Avvio…' };
+        HSync.renderCatSave();
+        try {
+            const data = await HSync.ajax('job_run_now', { id: String(st.jobId) });
+            st.msg = { kind: data.status === 'failed' ? 'err' : 'ok', html: esc(HSync.describeRunNowSimple(data)) + ' Lo stato è nella Panoramica.' };
+        } catch (e) {
+            st.msg = { kind: 'err', html: esc(e.message) };
+        }
+        HSync.renderCatSave();
+        HSync.loadOverview();
     };
 
     // ── Storico (simple columns) ──────────────────────────────────
@@ -5005,6 +5475,13 @@
         if (act === 'feed-run')    return HSync.feedRunNow(parseInt(sa.dataset.id, 10));
         if (act === 'feed-stop')   return HSync.feedStop(parseInt(sa.dataset.id, 10));
         if (act === 'feed-import') return HSync.openImport(parseInt(sa.dataset.id, 10));
+        if (act === 'feed-catalog') return HSync.openCatalog(parseInt(sa.dataset.id, 10));
+        if (act === 'cat-save')    return HSync.catSave();
+        if (act === 'cat-reset')   return HSync.catLoad(true);
+        if (act === 'cat-refresh') return HSync.catLoadTree(true);
+        if (act === 'cat-retry')   return HSync.catLoad(false);
+        if (act === 'cat-expand')  return HSync.catToggleExpand(sa.dataset.value);
+        if (act === 'cat-sync')    return HSync.catSyncNow();
         if (act === 'goto-tab')    return HSync.switchTab(sa.dataset.tab);
         if (act === 'qi-start')    return HSync.qiStart();
         if (act === 'qi-stop')     return HSync.qiStop();
@@ -5214,6 +5691,10 @@
         if (el.matches('[name="hsync-qi-scope"]'))         return HSync.qiSetScope(el.value);
         if (el.matches('[data-action="qi-cat"]'))          return HSync.qiToggleCat(el.dataset.value, el.checked);
         if (el.matches('[data-action="qi-sub"]'))          return HSync.qiToggleSub(el.dataset.cat, el.dataset.value, el.checked);
+        if (el.matches('[data-action="cat-feed"]'))        return HSync.openCatalog(parseInt(el.value, 10), true);
+        if (el.matches('[name="hsync-cat-scope"]'))        return HSync.catSetScope(el.value);
+        if (el.matches('[data-action="cat-pick"]'))        return HSync.catPick(el.dataset.cat || '', el.dataset.value, el.checked);
+        if (el.matches('[data-action="cat-margin"], [data-action="cat-default"]')) return HSync.catMarginChanged(el, true);
 
         if (e.target.matches('[data-control="mappings-filter"]')) HSync.loadMappings();
         if (e.target.matches('[data-field="run-source"]'))        HSync.populateRunMappings();
@@ -5258,6 +5739,8 @@
 
     document.addEventListener('input', function (e) {
         if (e.target.matches('[data-action="qi-search"]')) return HSync.qiSearch(e.target.value);
+        if (e.target.matches('[data-action="cat-search"]')) return HSync.catSearch(e.target.value);
+        if (e.target.matches('[data-action="cat-margin"], [data-action="cat-default"]')) return HSync.catMarginChanged(e.target, false);
         // Live-sync spine value inputs into state.
         if (e.target.matches('[data-mapping-key]')) {
             HSync.state.mappingValues[e.target.dataset.mappingKey] = e.target.value;
