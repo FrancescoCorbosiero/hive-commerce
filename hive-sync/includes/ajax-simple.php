@@ -17,6 +17,10 @@
  *   import_params       → a job's run parameters for the browser tick loop,
  *                         optionally narrowed to some categories
  *   run_cancel          → close a browser-driven run the owner stopped
+ *   catalog_settings    → what an automation sells (all / some categories)
+ *                         and at which margins
+ *   catalog_settings_save → write both: scope on the job, margins on the
+ *                         feed's source-config
  */
 
 defined( 'ABSPATH' ) || exit;
@@ -38,6 +42,7 @@ use HiveSync\Workflow\Schedule\RunnerLease;
 use HiveSync\Workflow\Schedule\RunState;
 use HiveSync\Workflow\Simple\FeedCategorySnapshot;
 use HiveSync\Workflow\Simple\FeedOverview;
+use HiveSync\Workflow\Simple\MarginSettings;
 use HiveSync\Workflow\Simple\SimpleSettings;
 
 // How long a feed's category snapshot is reused before the picker
@@ -272,11 +277,10 @@ add_action( 'wp_ajax_hsync_ajax_import_params', function () {
             wp_send_json_error( [ 'message' => 'Questo fornitore non ha categorie: si può importare solo il catalogo intero.' ] );
         }
         $options['category_filter'] = array_column( $picked, 'label' );
-        // The runner sees a slice of the feed, so the sweep of delisted
-        // products would refuse to run anyway (everything outside the
-        // slice would read as delisted) — asking for it only puts a
-        // warning about it in front of the owner. Not asking changes
-        // nothing else: the RESTORE half runs on every sync regardless.
+        // A one-off import ADDS a slice of the catalog: hiding what the
+        // supplier delisted elsewhere is the automatic sync's decision,
+        // not a side effect of "import these categories". Restores still
+        // run (they run on every sync), limited to the chosen slice.
         unset( $options['retire_missing'], $options['retire_mode'], $options['retire_max_ratio'] );
     }
 
@@ -314,4 +318,123 @@ add_action( 'wp_ajax_hsync_ajax_run_cancel', function () {
     $repo->cancel( $runId, 'operator' );
     RunCache::clear( $runId );
     wp_send_json_success( [ 'cancelled' => true, 'status' => 'cancelled' ] );
+} );
+
+// ─── Catalogo e prezzi ─────────────────────────────────────────────
+//
+// What an automation sells and at which margin, in the owner's terms.
+// The scope is the job's own `options.category_filter` (the runner
+// filters after seeing the whole feed, so a category-limited sync still
+// hides delisted products — see ImportRunner $runnerCategories). The
+// margins live on the feed's source-config, where the fetch applies
+// them: they hold for every automation on that feed, and re-applying
+// them is idempotent (always computed from the supplier's raw cost).
+
+/**
+ * The scope of a job as the editor shows it: 'all', 'cats' (only exact
+ * category paths — what the editor writes) or 'custom' (a legacy
+ * substring filter written by hand: shown, never rewritten).
+ *
+ * @param array<string, mixed> $options
+ * @return array{scope: string, categories: string[]}
+ */
+function hsync_catalog_scope( array $options ): array {
+    $entries = CategoryFilter::parse( $options['category_filter'] ?? null );
+    if ( ! $entries ) return [ 'scope' => 'all', 'categories' => [] ];
+    foreach ( $entries as $e ) {
+        if ( $e['type'] !== 'path' ) return [ 'scope' => 'custom', 'categories' => array_column( $entries, 'label' ) ];
+    }
+    return [ 'scope' => 'cats', 'categories' => array_column( $entries, 'label' ) ];
+}
+
+/** How many automations share this feed config (margins apply to all). */
+function hsync_catalog_jobs_on_config( string $configSlug ): int {
+    $n = 0;
+    foreach ( ( new JobRepository() )->all() as $job ) {
+        if ( (string) ( $job['runnable_type'] ?? '' ) !== 'source.import' ) continue;
+        if ( FeedOverview::importTarget( $job )[1] === $configSlug ) $n++;
+    }
+    return $n;
+}
+
+add_action( 'wp_ajax_hsync_ajax_catalog_settings', function () {
+    hsync_ajax_guard();
+    $t     = hsync_job_import_target( (int) hsync_post_text( 'job_id' ) );
+    $scope = hsync_catalog_scope( $t['options'] );
+    wp_send_json_success( $scope + [
+        'job_id'         => (int) $t['job']['id'],
+        'has_categories' => $t['source']->hasCategories( $t['config'] ),
+        'margins'        => MarginSettings::read( $t['source_id'], $t['config'] ),
+        'shared_jobs'    => hsync_catalog_jobs_on_config( $t['config_slug'] ),
+        'limits'         => [ 'min' => MarginSettings::MIN, 'max' => MarginSettings::MAX ],
+    ] );
+} );
+
+add_action( 'wp_ajax_hsync_ajax_catalog_settings_save', function () {
+    hsync_ajax_guard();
+    $t   = hsync_job_import_target( (int) hsync_post_text( 'job_id' ) );
+    $job = $t['job'];
+
+    // Margins → the feed's source-config. Validated before anything is
+    // written, so a bad number never leaves half a save behind.
+    $margins = MarginSettings::read( $t['source_id'], $t['config'] );
+    $newConfig = null;
+    if ( $margins['supported'] && isset( $_POST['default'] ) ) {
+        $default = (float) str_replace( ',', '.', hsync_post_text( 'default' ) );
+        $perCat  = $margins['by_category'] ? hsync_post_json( 'margins' ) : [];
+        try {
+            $newConfig = MarginSettings::write( $t['source_id'], $t['config'], $default, $perCat );
+        } catch ( \InvalidArgumentException $e ) {
+            wp_send_json_error( [ 'message' => $e->getMessage() ] );
+        }
+    }
+
+    // Scope → the job. A hand-written legacy filter is left as it is.
+    $config  = is_array( $job['config'] ?? null ) ? $job['config'] : [];
+    foreach ( RunState::RUNTIME_CONFIG_KEYS as $k ) unset( $config[ $k ] );
+    $options = is_array( $config['options'] ?? null ) ? $config['options'] : [];
+    $scope   = hsync_post_text( 'scope' );
+    if ( $scope === 'cats' ) {
+        if ( ! $t['source']->hasCategories( $t['config'] ) ) {
+            wp_send_json_error( [ 'message' => 'Questo fornitore non ha categorie.' ] );
+        }
+        $picked = array_values( array_filter(
+            CategoryFilter::parse( hsync_post_json( 'categories' ) ),
+            static fn( array $e ): bool => $e['type'] === 'path'
+        ) );
+        if ( ! $picked ) {
+            wp_send_json_error( [ 'message' => 'Scegli almeno una categoria, oppure «Tutto il catalogo».' ] );
+        }
+        $options['category_filter'] = array_column( $picked, 'label' );
+    } elseif ( $scope === 'all' ) {
+        unset( $options['category_filter'] );
+    }
+    $config['options'] = $options;
+
+    if ( $newConfig !== null ) {
+        $repo   = new SourceConfigRepository();
+        $stored = $repo->find( $t['config_slug'] );
+        $repo->save( [
+            'slug'        => $t['config_slug'],
+            'name'        => (string) ( $stored['name'] ?? $t['config_slug'] ),
+            'source_kind' => $t['source_id'],
+            'config'      => $newConfig,
+        ], (array) ( $stored['config'] ?? [] ) );
+    }
+    ( new JobRepository() )->save( [
+        'id'            => (int) $job['id'],
+        'runnable_type' => (string) $job['runnable_type'],
+        'runnable_ref'  => (string) $job['runnable_ref'],
+        'cron_expr'     => (string) ( $job['cron_expr'] ?? '' ),
+        'enabled'       => ! empty( $job['enabled'] ),
+        'next_run_at'   => $job['next_run_at'] ?? null,
+        'config'        => $config,
+    ] );
+
+    wp_send_json_success( [
+        'enabled'     => ! empty( $job['enabled'] ),
+        'next_run_at' => ! empty( $job['enabled'] ) ? ( $job['next_run_at'] ?? null ) : null,
+        'running'     => RunState::isRunning( $job['run_state'] ?? null ),
+        'shared_jobs' => hsync_catalog_jobs_on_config( $t['config_slug'] ),
+    ] );
 } );

@@ -74,6 +74,7 @@ final class FeedOverviewTest extends TestCase
         $this->assertFalse( $c['add_new'] );
         $this->assertFalse( $c['hides_missing'] );
         $this->assertSame( 'Borse, Calzature › Sneakers', $c['categories_label'] );
+        $this->assertSame( '×3,5', $c['margins_label'], 'the seeded SF default (no sf_markup_value → legacy 35/10)' );
     }
 
     public function testEditorBuiltJobsKeepTheirSlugInConfig(): void

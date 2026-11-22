@@ -100,6 +100,7 @@ final class FeedOverview
         };
 
         $sourceId = $slug = $configName = '';
+        $row = null;
         $configured = true;
         $importable = false;
         $categories = false;
@@ -159,6 +160,8 @@ final class FeedOverview
             // says so, because it is the one thing a sync does to products
             // the owner may not expect.
             'hides_missing'    => $kind === 'import' && ! empty( $options['retire_missing'] ),
+            // "×3,5 · Calzature › Sneakers ×4": what the owner sells at.
+            'margins_label'    => $row ? MarginSettings::describe( MarginSettings::read( (string) ( $row['source_kind'] ?? $sourceId ), (array) ( $row['config'] ?? [] ) ) ) : '',
             'categories'       => array_column( CategoryFilter::parse( $filter ), 'label' ),
             'categories_label' => CategoryFilter::describe( $filter ),
             'last'             => isset( $latest[ $id ] ) ? self::lastRun( $latest[ $id ] ) : null,

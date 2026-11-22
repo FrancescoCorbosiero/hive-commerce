@@ -125,6 +125,7 @@ class ComposerStaticInit8ec97cf8e32aa119124e2c238cc20b92
         'HiveSync\\Workflow\\Seed\\Defaults' => __DIR__ . '/../..' . '/src/Workflow/Seed/Defaults.php',
         'HiveSync\\Workflow\\Simple\\FeedCategorySnapshot' => __DIR__ . '/../..' . '/src/Workflow/Simple/FeedCategorySnapshot.php',
         'HiveSync\\Workflow\\Simple\\FeedOverview' => __DIR__ . '/../..' . '/src/Workflow/Simple/FeedOverview.php',
+        'HiveSync\\Workflow\\Simple\\MarginSettings' => __DIR__ . '/../..' . '/src/Workflow/Simple/MarginSettings.php',
         'HiveSync\\Workflow\\Simple\\SimpleSettings' => __DIR__ . '/../..' . '/src/Workflow/Simple/SimpleSettings.php',
     );
 

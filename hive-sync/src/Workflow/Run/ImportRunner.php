@@ -16,6 +16,7 @@ use HiveSync\Core\Source\Diff;
 use HiveSync\Core\Source\FeedItem;
 use HiveSync\Core\Source\FetchRequest;
 use HiveSync\Core\Source\Source;
+use HiveSync\Sources\CategoryFilter;
 
 /**
  * Orchestrates one source.import run with the full lifecycle:
@@ -266,6 +267,19 @@ final class ImportRunner
         // the sweep. Pure function of the config — no query.
         $provenance = $source->provenanceKey( $config );
 
+        // `category_filter` on a source that knows its items' categories
+        // (SF) is applied HERE, after the full feed has been seen — not
+        // inside fetch(). The difference is the sweep: it compares the
+        // catalog with EVERY SKU the supplier listed, so a product outside
+        // the chosen categories but still for sale is not "missing", and
+        // a category-limited sync keeps hiding what is truly delisted.
+        // Sources that can't name an item's category keep filtering in
+        // fetch() and keep the guard below.
+        $categoryFilter   = CategoryFilter::parse( $options['category_filter'] ?? null );
+        $runnerCategories = $categoryFilter !== []
+            && $source instanceof \HiveSync\Core\Source\AbstractSource
+            && $source->hasCategories( $config );
+
         $retireBlocked = '';
         if ( $retireRequested ) {
             if ( $skuList )                 $retireBlocked = 'skus';
@@ -279,7 +293,9 @@ final class ImportRunner
             // tick, forever. This is the one case the ratio guard can't
             // be relied on to catch: a slice holding 70% of the catalog
             // retires the other 30%, comfortably under the threshold.
-            elseif ( ! empty( $options['category_filter'] ) ) $retireBlocked = 'category_filter';
+            // (Only when the source filters inside fetch(): see
+            // $runnerCategories above for the shape that stays safe.)
+            elseif ( ! empty( $options['category_filter'] ) && ! $runnerCategories ) $retireBlocked = 'category_filter';
             elseif ( $provenance === '' ) $retireBlocked = 'no_provenance';
         }
         $retireMissing = $retireRequested && $retireBlocked === '';
@@ -355,7 +371,9 @@ final class ImportRunner
             $sweep          = (array) ( $cached['sweep'] ?? [] ) + $sweep;
         } else {
             try {
-                $fetch = $source->fetch( new FetchRequest( $config, $options ), $ctx );
+                $fetchOptions = $options;
+                if ( $runnerCategories ) unset( $fetchOptions['category_filter'] );
+                $fetch = $source->fetch( new FetchRequest( $config, $fetchOptions ), $ctx );
             } catch ( \HiveSync\Core\Source\TransientSourceException $e ) {
                 // Transient upstream failure (5xx / cURL timeout /
                 // 200-empty-body on a multi-MB CSV). Mark the DB run
@@ -395,6 +413,32 @@ final class ImportRunner
                 foreach ( $items as $it ) {
                     if ( $it instanceof FeedItem && $it->sku !== '' ) $allFeedSkus[] = $it->sku;
                 }
+            }
+
+            // Narrow to the chosen categories, AFTER $allFeedSkus has the
+            // whole feed (see $runnerCategories).
+            $sliceSkus = null;
+            if ( $runnerCategories ) {
+                $kept      = [];
+                $sliceSkus = [];
+                foreach ( $items as $it ) {
+                    if ( ! $it instanceof FeedItem ) continue;
+                    $path = $source->categoryPath( $it );
+                    if ( $path !== null && CategoryFilter::matches( $path[0], $path[1], $categoryFilter ) ) {
+                        $kept[] = $it;
+                        $sliceSkus[ strtolower( $it->sku ) ] = true;
+                    }
+                }
+                // Almost always a category the supplier renamed: say so,
+                // or a filtered sync imports nothing, green run after run.
+                if ( ! $kept && $items ) {
+                    $fetchWarnings[] = sprintf(
+                        'Nessuno dei %d prodotti del feed appartiene alle categorie selezionate (%s). Il fornitore potrebbe averle rinominate: riapri la scelta delle categorie.',
+                        count( $items ),
+                        CategoryFilter::describe( $options['category_filter'] ?? null )
+                    );
+                }
+                $items = $kept;
             }
 
             // Narrow to the requested SKUs BEFORE diff — the feed is a
@@ -468,6 +512,16 @@ final class ImportRunner
                     [ 'max_ratio' => $retireMaxRatio ],
                     $retireMissing
                 );
+                // Retires were judged against the whole feed. Restores are
+                // kept to the chosen categories: a product brought back
+                // outside them would reappear with the stock it was
+                // retired with, because nothing in this run re-stocks it.
+                if ( $sliceSkus !== null ) {
+                    $decision['restore'] = array_values( array_filter(
+                        (array) ( $decision['restore'] ?? [] ),
+                        static fn( $it ): bool => $it instanceof FeedItem && isset( $sliceSkus[ strtolower( $it->sku ) ] )
+                    ) );
+                }
                 $diff  = MissingSweeper::apply( $diff, $decision );
                 $sweep = [
                     'retire'       => count( $decision['retire'] ),
@@ -628,7 +682,7 @@ final class ImportRunner
         // level like `fetched`, so it rides every tick's report and the
         // Storico row can say "solo Calzature" instead of leaving a
         // category import indistinguishable from a full sync.
-        $categoryScope = \HiveSync\Sources\CategoryFilter::describe( $options['category_filter'] ?? null );
+        $categoryScope = CategoryFilter::describe( $options['category_filter'] ?? null );
         if ( $categoryScope !== '' ) {
             $summary['categories'] = $categoryScope;
         }

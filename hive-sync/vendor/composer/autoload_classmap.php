@@ -110,5 +110,6 @@ return array(
     'HiveSync\\Workflow\\Seed\\Defaults' => $baseDir . '/src/Workflow/Seed/Defaults.php',
     'HiveSync\\Workflow\\Simple\\FeedCategorySnapshot' => $baseDir . '/src/Workflow/Simple/FeedCategorySnapshot.php',
     'HiveSync\\Workflow\\Simple\\FeedOverview' => $baseDir . '/src/Workflow/Simple/FeedOverview.php',
+    'HiveSync\\Workflow\\Simple\\MarginSettings' => $baseDir . '/src/Workflow/Simple/MarginSettings.php',
     'HiveSync\\Workflow\\Simple\\SimpleSettings' => $baseDir . '/src/Workflow/Simple/SimpleSettings.php',
 );

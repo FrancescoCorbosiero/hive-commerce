@@ -2,8 +2,8 @@
 /**
  * Hive Sync admin page.
  *
- * Simple view (default, for the shop owner): Panoramica · Importa
- * prodotti · Storico. Advanced view (switch in the header): the same
+ * Simple view (default, for the shop owner): Panoramica · Catalogo e
+ * prezzi · Importa prodotti · Storico. Advanced view (switch in the header): the same
  * three plus the technical tabs — Connetti, Mappa, Componi, Regole,
  * Import manuale, Automatizza, Media, Esporta, Strumenti, Config.
  *
@@ -32,7 +32,8 @@ function hsync_render_admin_page(): void {
     ?>
     <?php
     // Two views over the same engine. The SIMPLE one (default) is for the
-    // shop owner: three tabs — Panoramica, Importa prodotti, Storico —
+    // shop owner: four tabs — Panoramica, Catalogo e prezzi, Importa
+    // prodotti, Storico —
     // that work in automations and plain words. Everything technical
     // (sources, mappings, pipelines, rules, cron, JSON, cleanup tools)
     // carries data-advanced and only shows once "Modalità avanzata" is
@@ -82,6 +83,7 @@ function hsync_render_admin_page(): void {
 
         <nav class="hsync-tabs" role="tablist">
             <button class="hsync-tab is-active" data-tab="home"   role="tab" aria-selected="true"  title="Stato delle sincronizzazioni con i fornitori"><span class="hsync-tab-icon dashicons dashicons-dashboard" aria-hidden="true"></span> Panoramica</button>
+            <button class="hsync-tab"           data-tab="catalog" role="tab" aria-selected="false" title="Cosa vendere di ogni fornitore e con quale ricarico"><span class="hsync-tab-icon dashicons dashicons-tag" aria-hidden="true"></span> Catalogo e prezzi</button>
             <button class="hsync-tab"           data-tab="import" role="tab" aria-selected="false" title="Aggiungi al negozio i prodotti di un fornitore, anche solo di alcune categorie"><span class="hsync-tab-icon dashicons dashicons-download" aria-hidden="true"></span> Importa prodotti</button>
             <button class="hsync-tab"           data-tab="runs"   role="tab" aria-selected="false" title="Cosa è stato importato e aggiornato, e quando"><span class="hsync-tab-icon dashicons dashicons-list-view" aria-hidden="true"></span> Storico</button>
             <span class="hsync-tab-sep" aria-hidden="true" data-advanced></span>
@@ -103,6 +105,10 @@ function hsync_render_admin_page(): void {
             <div class="hsync-feeds" data-region="home-cards">
                 <p class="hsync-loading">Caricamento…</p>
             </div>
+        </section>
+
+        <section class="hsync-panel" data-panel="catalog">
+            <div data-region="cat"><p class="hsync-loading">Caricamento…</p></div>
         </section>
 
         <section class="hsync-panel" data-panel="import">
